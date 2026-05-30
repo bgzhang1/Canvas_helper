@@ -4,6 +4,8 @@
 
 Canvas_helper 是一个本地 Canvas 课程资料助手，用来同步课程、公告、作业、页面、成员和文件索引，并把课件安全地备份到本机。它提供 React 前端、FastAPI 后端、SQLite 本地缓存、文件文本抽取/OCR，以及可选的 OpenAI-compatible AI 分析能力。
 
+![Dashboard](docs/images/dashboard.png)
+
 ## 项目特点
 
 - 只读 Canvas 访问：后端 Canvas 客户端只允许 `GET` 和 `HEAD`，Token 不会暴露给浏览器。
@@ -50,6 +52,8 @@ OPENAI_COMPAT_MODEL=gpt-4.1-mini
 ```
 
 ## 使用方式
+
+![Files](docs/images/files.png)
 
 推荐直接运行：
 

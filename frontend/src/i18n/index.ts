@@ -86,8 +86,8 @@ const translations = {
     last: 'LAST',
     noCourses: 'NO COURSES IN LOCAL CACHE. RUN FORCE SYNC.',
     news: 'NEWS',
-    noTerm: 'NO TERM',
-    noTermCompact: 'NO_TERM',
+    noTerm: 'OTHER / PUBLIC SPACES',
+    noTermCompact: 'OTHER',
     courseSync: 'COURSE_SYNC',
     analyze: 'ANALYZE',
     canvasHome: 'CANVAS HOME',
@@ -248,62 +248,6 @@ const translations = {
     actionAgentChatFailed: 'Agent chat failed',
     actionAgentChatNotConfigured: 'Agent not configured'
   },
-  zh: {
-    sysMenu: '// 系统.菜单',
-    dashboard: '仪表盘',
-    configuration: '系统配置',
-    activeTerm: '// 当前.学期',
-    appTitle: 'CANVAS_HELPER',
-    searchPlaceholder: '检索本地缓存...',
-    syncing: '同步中...',
-    forceSync: '强制同步',
-    interruptSync: '中断',
-    configTitle: '配置.',
-    loadingConfig: '正在加载配置',
-    securityEnv: 'CANVAS 安全与环境',
-    isolated: '已隔离',
-    tokenNotice: '前端无法读取 Token，凭据只保留在后端。',
-    canvasApiToken: 'CANVAS_API_TOKEN',
-    newCanvasApiToken: '新的 Canvas Token',
-    canvasTokenPlaceholder: '粘贴新的 Canvas Token；当前 Token 永不回显。',
-    aiInference: 'AI 推理引擎',
-    compatBaseUrl: '兼容 API 地址',
-    apiKey: 'API 密钥',
-    existingKeyPlaceholder: '留空则保留现有密钥',
-    modelSelect: '目标模型',
-    modelPlaceholder: '例如 gpt-4.1-mini, qwen-max, deepseek-chat',
-    reasoningEffort: '推理强度',
-    low: '低',
-    medium: '中',
-    high: '高',
-    skillManagement: '技能管理',
-    skillPlaceholder: '填写启用的分析技能或自定义分析指令',
-    syncDaemon: '同步服务守护进程',
-    backgroundFetch: '后台抓取',
-    backgroundFetchDesc: '自动增量同步 Canvas 本地缓存。',
-    cronInterval: '执行间隔',
-    latest: '最近状态',
-    every15min: '每 15 分钟',
-    every1h: '每 1 小时',
-    every6h: '每 6 小时',
-    nightly: '每天一次',
-    saveConfig: '保存配置',
-    notificationChannels: '通知渠道',
-    telegramPush: 'Telegram 机器人',
-    telegramDesc: '用于同步事件的即时消息通知。',
-    botToken: '机器人 Token',
-    chatId: '会话 ID',
-    emailPush: '邮件目标',
-    emailDesc: '用于每日摘要和紧急提醒。',
-    targetAddress: '目标邮箱',
-    readOnlyBoundary: '只读边界',
-    readOnlyNotice: '浏览器只访问本地缓存接口。Canvas 凭据留在服务端，Canvas 客户端只允许 GET 和 HEAD。',
-    aiTimeline: 'AI 合成时间线',
-    aiTimelineDesc: '数据来自已同步的 Canvas 作业、日历事件、公告、页面和本地解析文件。',
-    pastEvents: '历史节点（7 天前）',
-    source: '来源',
-    confidence: '置信度'
-  }
 } as const;
 
 export type TranslationKey = keyof typeof translations.en;
@@ -393,8 +337,8 @@ const zhOverrides: Partial<Record<TranslationKey, string>> = {
   last: '最近',
   noCourses: '本地缓存中没有课程。请先运行强制同步。',
   news: '公告',
-  noTerm: '无学期',
-  noTermCompact: '无学期',
+  noTerm: '其他 / 公共工作区',
+  noTermCompact: '其他',
   courseSync: '课程同步',
   analyze: '分析',
   canvasHome: 'Canvas 首页',
@@ -549,15 +493,12 @@ const zhOverrides: Partial<Record<TranslationKey, string>> = {
   actionFileBackupFailed: '文件备份失败',
   actionAnalysisStarted: 'AI 分析开始',
   actionAnalysisCompleted: 'AI 分析完成',
-  actionAnalysisFailed: 'AI 分析失败'
-};
-
-Object.assign(zhOverrides, {
+  actionAnalysisFailed: 'AI 分析失败',
   actionAgentChatStarted: 'Agent 对话开始',
   actionAgentChatCompleted: 'Agent 对话完成',
   actionAgentChatFailed: 'Agent 对话失败',
   actionAgentChatNotConfigured: 'Agent 未配置'
-});
+};
 
 export function translate(lang: Lang, key: TranslationKey) {
   if (lang === 'zh' && zhOverrides[key]) return zhOverrides[key];

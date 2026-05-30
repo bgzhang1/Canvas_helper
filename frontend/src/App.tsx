@@ -1,14 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, MessageSquare, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
-import type { ActiveTab, AnalysisStatus, AppSettings, Course, CourseDetail, SyncStatus, View } from './types';
 import type { Lang, TFunction } from './i18n';
+import type { View } from './types';
 import { translate } from './i18n';
 import { AppContext, type AppContextValue } from './context/AppContext';
-import { fetchAnalysisStatus } from './api/analysis';
-import { fetchCourseDetail, fetchCourses, startCourseAnalysis, startCourseSync } from './api/courses';
-import { fetchSettings } from './api/settings';
-import { cancelSync, fetchSyncStatus, startGlobalSync } from './api/sync';
 import { EmptyState, GridBackground } from './components/ui';
 import { SidebarButton } from './components/SidebarButton';
 import { SyncProgressBar } from './components/SyncProgressBar';
@@ -17,8 +13,11 @@ import { CourseDetailView } from './views/CourseDetailView';
 import { AgentChatView } from './views/AgentChatView';
 import { SettingsView } from './views/SettingsView';
 import { courseCode, statusForCourse } from './utils/course';
-import { analysisStatusToProgress, idleAnalysisStatus, parseSyncProgress } from './utils/progress';
+import { analysisStatusToProgress, parseSyncProgress } from './utils/progress';
 import { useTermGroups } from './hooks/useTermGroups';
+import { useCanvasData } from './hooks/useCanvasData';
+import { useAnnouncementsSeen } from './hooks/useAnnouncementsSeen';
+import { useExternalLinkHardening } from './hooks/useExternalLinkHardening';
 
 export function App() {
   const navigate = useNavigate();
@@ -27,41 +26,42 @@ export function App() {
   const selectedCourseId = courseMatch?.params.courseId ? Number(courseMatch.params.courseId) : null;
 
   const [lang, setLang] = useState<Lang>('zh');
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [agentCourseId, setAgentCourseId] = useState<number | null>(null);
-  const [detail, setDetail] = useState<CourseDetail | null>(null);
-  const [activeTab, setActiveTab] = useState<ActiveTab>('timeline');
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ running: false, run: null });
-  const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>(idleAnalysisStatus);
-  const [showAnalysisDone, setShowAnalysisDone] = useState(false);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [isCancellingSync, setIsCancellingSync] = useState(false);
-  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [agentCourseId, setAgentCourseId] = useState<number | null>(null);
   const [mobileSystemOpen, setMobileSystemOpen] = useState(false);
   const [mobileCoursesOpen, setMobileCoursesOpen] = useState(false);
-  const [seenAnnouncements, setSeenAnnouncements] = useState<Record<number, number>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem('canvasSeenAnnouncements') || '{}') as Record<number, number>;
-    } catch {
-      return {};
-    }
-  });
   const t = useCallback<TFunction>((key) => translate(lang, key), [lang]);
-  const courseGroups = useTermGroups(courses);
 
-  const selectedCourse = useMemo(
-    () => (selectedCourseId != null ? courses.find((course) => course.id === selectedCourseId) ?? null : null),
-    [courses, selectedCourseId]
-  );
-  const selectedCourseRef = useRef<Course | null>(null);
-  selectedCourseRef.current = selectedCourse;
-  const loadedCourseIdRef = useRef<number | null>(null);
-  const detailRequestIdRef = useRef(0);
-  const handledAnalysisSuccessRef = useRef<string | null>(null);
+  const {
+    courses,
+    selectedCourse,
+    detail,
+    activeTab,
+    setActiveTab,
+    syncStatus,
+    analysisStatus,
+    showAnalysisDone,
+    settings,
+    setSettings,
+    error,
+    setError,
+    busy,
+    setBusy,
+    isLoadingDetail,
+    syncActive,
+    cancelActive,
+    analysisActive,
+    loadSettings,
+    handleGlobalSync,
+    handleCourseSync,
+    handleAnalyzeCourse,
+    handleCancelSync,
+    refreshSelectedCourse
+  } = useCanvasData(selectedCourseId);
+
+  const courseGroups = useTermGroups(courses);
+  const { seenAnnouncements, markCourseAnnouncementsSeen } = useAnnouncementsSeen(courses);
+  useExternalLinkHardening();
 
   const currentView: View = courseMatch
     ? 'course'
@@ -77,47 +77,6 @@ export function App() {
     return courses.filter((course) => `${course.name} ${course.course_code ?? ''} ${course.term_name ?? ''}`.toLowerCase().includes(needle));
   }, [courses, query]);
 
-  useEffect(() => {
-    loadInitial();
-  }, []);
-
-  const markCourseAnnouncementsSeen = useCallback((courseId: number, count: number) => {
-    setSeenAnnouncements((prev) => {
-      if (prev[courseId] === count) return prev;
-      const next = { ...prev, [courseId]: count };
-      try {
-        localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
-      } catch {
-        /* ignore storage errors */
-      }
-      return next;
-    });
-  }, []);
-
-  // Baseline newly discovered courses to their current count, so only later
-  // increases (new announcements after a refresh) light up the red dot.
-  useEffect(() => {
-    if (courses.length === 0) return;
-    setSeenAnnouncements((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const course of courses) {
-        if (!(course.id in next)) {
-          next[course.id] = course.announcement_count;
-          changed = true;
-        }
-      }
-      if (changed) {
-        try {
-          localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
-        } catch {
-          /* ignore storage errors */
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [courses]);
-
   // Viewing a course's announcements clears its "new" dot.
   useEffect(() => {
     if (currentView === 'course' && activeTab === 'announcements' && selectedCourse) {
@@ -126,209 +85,9 @@ export function App() {
   }, [currentView, activeTab, selectedCourse, markCourseAnnouncementsSeen]);
 
   useEffect(() => {
-    function markLink(link: HTMLAnchorElement) {
-      link.target = '_blank';
-      const rel = new Set(link.rel.split(/\s+/).filter(Boolean));
-      rel.add('noopener');
-      rel.add('noreferrer');
-      link.rel = Array.from(rel).join(' ');
-    }
-
-    function markLinks(root: ParentNode) {
-      root.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(markLink);
-    }
-
-    function handleLinkClick(event: MouseEvent) {
-      const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
-      if (target) markLink(target);
-    }
-
-    markLinks(document);
-    document.addEventListener('click', handleLinkClick, true);
-    document.addEventListener('auxclick', handleLinkClick, true);
-    return () => {
-      document.removeEventListener('click', handleLinkClick, true);
-      document.removeEventListener('auxclick', handleLinkClick, true);
-    };
-  }, []);
-
-  useEffect(() => {
     setMobileSystemOpen(false);
     setMobileCoursesOpen(false);
   }, [location.pathname]);
-
-  const syncActive = isSyncing || syncStatus.running || syncStatus.run?.status === 'running';
-  const cancelActive = isCancellingSync || Boolean(syncStatus.cancel_requested);
-  const analysisActive = analysisStatus.running || analysisStatus.status === 'running';
-
-  useEffect(() => {
-    const timer = window.setInterval(() => loadSyncStatus().catch(() => undefined), syncActive ? 1000 : 5000);
-    return () => window.clearInterval(timer);
-  }, [syncActive]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => loadAnalysisStatus().catch(() => undefined), analysisActive ? 1000 : 5000);
-    return () => window.clearInterval(timer);
-  }, [analysisActive, selectedCourseId]);
-
-  // Load (or clear) the course detail whenever the routed course changes.
-  useEffect(() => {
-    if (selectedCourseId == null) {
-      setDetail(null);
-      loadedCourseIdRef.current = null;
-      return;
-    }
-    if (loadedCourseIdRef.current === selectedCourseId) return;
-    const course = courses.find((item) => item.id === selectedCourseId);
-    if (!course) return;
-    loadedCourseIdRef.current = selectedCourseId;
-    setActiveTab('timeline');
-    void loadCourseDetail(course);
-  }, [selectedCourseId, courses]);
-
-  async function loadInitial() {
-    await Promise.all([loadCourses(), loadSyncStatus(), loadAnalysisStatus(), loadSettings()]);
-  }
-
-  async function loadCourses() {
-    try {
-      setCourses(await fetchCourses());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function loadSyncStatus() {
-    const nextStatus = await fetchSyncStatus();
-    setSyncStatus((previous) => {
-      const previousActive = previous.running || previous.run?.status === 'running';
-      const nextActive = nextStatus.running || nextStatus.run?.status === 'running';
-      if (previousActive && !nextActive) {
-        void loadCourses();
-        const course = selectedCourseRef.current;
-        if (course) void loadCourseDetail(course);
-      }
-      return nextStatus;
-    });
-  }
-
-  async function loadAnalysisStatus() {
-    const nextStatus = await fetchAnalysisStatus();
-    setAnalysisStatus((previous) => {
-      const course = selectedCourseRef.current;
-      if (nextStatus.running || nextStatus.status === 'running') {
-        handledAnalysisSuccessRef.current = null;
-      }
-      const successKey =
-        nextStatus.status === 'succeeded' && nextStatus.course_id != null
-          ? `${nextStatus.course_id}:${nextStatus.percent}:${nextStatus.stage}:${nextStatus.message ?? ''}`
-          : null;
-      const finishedSelectedCourse =
-        successKey != null &&
-        course != null &&
-        nextStatus.course_id === course.id &&
-        handledAnalysisSuccessRef.current !== successKey &&
-        (previous.running || previous.status !== nextStatus.status || previous.course_id !== nextStatus.course_id);
-      if (finishedSelectedCourse) {
-        handledAnalysisSuccessRef.current = successKey;
-        setShowAnalysisDone(true);
-        window.setTimeout(() => setShowAnalysisDone(false), 4500);
-        void loadCourseDetail(course);
-      }
-      return nextStatus;
-    });
-  }
-
-  async function loadSettings() {
-    try {
-      setSettings(await fetchSettings());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function loadCourseDetail(course: Course) {
-    const requestId = ++detailRequestIdRef.current;
-    setIsLoadingDetail(true);
-    setDetail(null);
-    setError(null);
-    try {
-      const nextDetail = await fetchCourseDetail(course.id);
-      if (detailRequestIdRef.current === requestId && selectedCourseRef.current?.id === course.id) {
-        setDetail(nextDetail);
-      }
-    } catch (err) {
-      if (detailRequestIdRef.current === requestId && selectedCourseRef.current?.id === course.id) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    } finally {
-      if (detailRequestIdRef.current === requestId) {
-        setIsLoadingDetail(false);
-      }
-    }
-  }
-
-  async function handleGlobalSync() {
-    setIsSyncing(true);
-    setError(null);
-    try {
-      await startGlobalSync();
-      await loadSyncStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsSyncing(false);
-    }
-  }
-
-  async function handleCourseSync(course: Course) {
-    setIsSyncing(true);
-    setError(null);
-    try {
-      await startCourseSync(course.id);
-      await loadSyncStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsSyncing(false);
-    }
-  }
-
-  async function handleAnalyzeCourse(course: Course) {
-    setBusy('analysis');
-    setError(null);
-    setShowAnalysisDone(false);
-    handledAnalysisSuccessRef.current = null;
-    setActiveTab('timeline');
-    try {
-      const started = await startCourseAnalysis(course.id);
-      if (started.progress) setAnalysisStatus(started.progress);
-      await loadAnalysisStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleCancelSync() {
-    setIsCancellingSync(true);
-    setError(null);
-    try {
-      await cancelSync();
-      await loadSyncStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsCancellingSync(false);
-    }
-  }
-
-  async function refreshSelectedCourse() {
-    await loadCourses();
-    const course = selectedCourseRef.current;
-    if (course) await loadCourseDetail(course);
-  }
 
   const syncProgress = parseSyncProgress(syncStatus);
   const showSyncProgress = syncActive || syncStatus.run?.status === 'failed' || syncStatus.run?.status === 'cancelled';
@@ -337,8 +96,8 @@ export function App() {
   const showSidebarProgress = showSyncProgress || showAnalysisProgress;
 
   const contextValue = useMemo<AppContextValue>(
-    () => ({ lang, setLang, t, error, setError, busy, setBusy, query, setQuery }),
-    [lang, t, error, busy, query]
+    () => ({ lang, setLang, t, canvasBaseUrl: settings?.canvas_base_url ?? '', error, setError, busy, setBusy, query, setQuery }),
+    [lang, t, settings?.canvas_base_url, error, setError, busy, setBusy, query]
   );
   const mobileViewLabel =
     currentView === 'dashboard'
@@ -637,7 +396,7 @@ export function App() {
             <Routes>
               <Route
                 path="/"
-                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} />}
+                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} onSync={handleGlobalSync} syncActive={syncActive} />}
               />
               <Route
                 path="/agent"

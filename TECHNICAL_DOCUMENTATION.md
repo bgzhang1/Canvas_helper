@@ -214,6 +214,8 @@ FastAPI `lifespan` 启动流程：
 容错策略：
 
 - announcements、assignments、calendar events、pages、people、files 的权限错误或不存在错误，如果 Canvas 返回 `401/403/404`，对应列表视为空列表。
+- 移除了 enrollment state 过滤，以解决已结束学期（ended semester）课程的同步问题。
+- 支持为使用 Canvas 默认 Syllabus 视图的课程进行 Syllabus 页面的合成同步。
 - 整体同步支持用户中断，中断时 sync run 状态为 `cancelled`。
 - 未捕获异常会将 sync run 标为 `failed` 并写入 event log。
 
@@ -401,6 +403,8 @@ data/canvas_helper.db
 | `assignment_count` | number | 作业数量 |
 | `file_count` | number | 文件索引数量 |
 | `downloaded_count` | number | 本地已下载文件数量 |
+| `upcoming_event_count` | number | 即将到来的事件数量 |
+| `term_start_at` | string/null | 学期开始时间，用于按学期分组和排序 |
 
 #### `GET /api/courses/{course_id}/announcements`
 
@@ -782,7 +786,7 @@ data/canvas_helper.db
 
 - 当前视图：`dashboard`、`course`、`settings`
 - 当前语言：`en`、`zh`
-- 课程列表、选中课程、课程详情
+- 课程列表（支持按学期 term 分组与折叠）、选中课程、课程详情
 - 当前课程 Tab：`timeline`、`files`、`announcements`、`assignments`、`people`
 - 同步状态和 AI 分析状态
 - 设置对象
@@ -824,7 +828,7 @@ data/canvas_helper.db
 
 | 组件 | 说明 |
 | --- | --- |
-| `DashboardView` | 展示课程卡片、课程数量、文件/作业统计、最近同步状态 |
+| `DashboardView` | 展示课程卡片（支持按学期 term 分组与折叠）、课程数量、文件/作业统计、最近同步状态 |
 | `CourseDetailView` | 展示课程标题、课程同步、AI 分析、Canvas home panel、课程 tabs |
 | `TimelineTab` | 优先展示 AI timeline；无 AI timeline 时展示 assignments/calendar structured timeline |
 | `FilesTab` | 文件分组、选中文件、备份、课程文件同步、批量下载、预览 modal |
@@ -832,7 +836,7 @@ data/canvas_helper.db
 | `AssignmentsTab` | 作业表格，支持 query 过滤 |
 | `PeopleTab` | 成员表格，支持 query 过滤 |
 | `SettingsView` | Canvas、AI、同步守护、通知、运行日志配置 |
-| `CanvasHomePanel` | 以 sandbox iframe 展示已缓存 Canvas home page |
+| `CanvasHomePanel` | 以 sandbox iframe 展示已缓存 Canvas home page（沙盒已扩展以允许弹出窗口和在新标签页打开链接） |
 | `SyncProgressBar` | 同步和 AI 分析进度展示 |
 
 ### 9.5 类型契约
@@ -857,6 +861,15 @@ data/canvas_helper.db
 - `EventLog`
 
 这些类型是接口变更时的前端兼容性基线。
+
+### 9.6 自定义 Hooks
+
+前端抽离了多个复用逻辑到自定义 Hooks：
+
+- `useTermGroups.ts`：将课程列表按学期（term）分组，并根据学期开始时间倒序排列。
+- `useAnnouncementsSeen.ts`：管理公告的已读/未读状态。
+- `useCanvasData.ts`：封装和管理从 Canvas 获取的数据状态。
+- `useExternalLinkHardening.ts`：增强外部链接的安全性和 target 控制。
 
 ## 10. 核心业务流程
 
