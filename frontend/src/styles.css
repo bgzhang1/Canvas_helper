@@ -1,0 +1,297 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background: #f4f4f0;
+  color: #000;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f4f4f0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.canvas-home-frame {
+  color-scheme: light;
+}
+
+.course-tabs {
+  top: -3rem;
+}
+
+.settings-root,
+.settings-root section,
+.settings-panel,
+.settings-actions {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.settings-panel {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.settings-panel * {
+  min-width: 0;
+}
+
+.settings-actions > * {
+  max-width: 100%;
+}
+
+.config-value {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.agent-root,
+.agent-chat-panel,
+.files-toolbar,
+.files-actions {
+  min-width: 0;
+}
+
+.safe-html-content {
+  overflow-wrap: anywhere;
+}
+
+.safe-html-content > * + * {
+  margin-top: 0.75rem;
+}
+
+.safe-html-content a {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  font-weight: 700;
+}
+
+.safe-html-content ul,
+.safe-html-content ol {
+  padding-left: 1.25rem;
+}
+
+.safe-html-content ul {
+  list-style: disc;
+}
+
+.safe-html-content ol {
+  list-style: decimal;
+}
+
+.safe-html-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.safe-html-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 1180px) {
+  .app-sidebar {
+    width: 15rem;
+  }
+
+  .app-content {
+    padding: 2rem;
+  }
+
+  .app-header {
+    padding-inline: 1.5rem;
+    gap: 1rem;
+  }
+
+  .dashboard-title {
+    font-size: 2.5rem;
+  }
+
+  .course-title {
+    font-size: 3rem;
+  }
+
+  .course-tabs {
+    top: -2rem;
+  }
+
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .mobile-nav.hidden {
+    display: block;
+  }
+
+  .app-sidebar {
+    display: none;
+  }
+
+  .app-main {
+    height: auto;
+    min-height: 0;
+    flex: 1 1 0;
+  }
+
+  .app-header {
+    min-height: auto;
+    flex-wrap: wrap;
+    align-items: stretch;
+    padding-block: 0.75rem;
+  }
+
+  .app-header > div {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .app-header input {
+    width: min(100%, 18rem);
+  }
+
+  .app-content {
+    padding: 1rem;
+  }
+
+  .dashboard-title {
+    font-size: 2rem;
+  }
+
+  .course-title {
+    font-size: 2.5rem;
+  }
+
+  .course-tabs {
+    top: -1rem;
+  }
+
+  table {
+    min-width: 760px;
+  }
+
+  .app-content .overflow-hidden:has(table) {
+    overflow-x: auto;
+  }
+
+  .agent-root {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+
+  .agent-sidebar {
+    max-height: 15rem;
+    flex: 0 0 auto;
+  }
+
+  .agent-chat-panel {
+    min-height: 34rem;
+  }
+
+  .agent-course-picker {
+    justify-content: stretch;
+  }
+
+  .agent-course-picker select {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    gap: 0.5rem;
+  }
+
+  .app-header > div:last-child {
+    gap: 0.5rem;
+  }
+
+  .app-content {
+    padding: 0.75rem;
+  }
+
+  .course-title {
+    font-size: 2rem;
+  }
+
+  .course-tabs {
+    top: -0.75rem;
+  }
+
+  .agent-root {
+    gap: 0.75rem;
+  }
+
+  .agent-sidebar {
+    max-height: 12rem;
+  }
+
+  .agent-chat-panel {
+    min-height: 32rem;
+  }
+
+  .agent-compose {
+    flex-direction: column;
+  }
+
+  .agent-compose button {
+    min-height: 3rem;
+    width: 100%;
+  }
+
+  .files-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .files-mount {
+    align-items: flex-start;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .files-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .files-actions button {
+    width: 100%;
+    justify-content: center;
+  }
+}

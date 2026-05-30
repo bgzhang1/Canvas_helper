@@ -1,0 +1,15 @@
+{
+  "name": "canvas-helper",
+  "description": "Local Canvas course material sync, backup, search, and AI analysis assistant.",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000",
+    "dev:frontend": "npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "npm --prefix frontend run build",
+    "test:backend": "pytest"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

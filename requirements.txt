@@ -1,0 +1,13 @@
+# Runtime dependencies (pinned for reproducible installs).
+# Test-only deps live in requirements-dev.txt.
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+httpx==0.28.1
+pydantic-settings==2.14.1
+python-dotenv==1.2.2
+PyMuPDF==1.27.2.3
+python-pptx==1.0.2
+python-docx==1.2.0
+beautifulsoup4==4.14.3
+pillow==12.2.0
+pytesseract==0.3.13
