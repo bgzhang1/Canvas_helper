@@ -21,7 +21,7 @@ table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #111;paddin
           </button>
         </div>
       </div>
-      <iframe className="canvas-home-frame w-full flex-1 bg-white" srcDoc={srcDoc} sandbox="" title={`${courseCode(course)} Canvas home`} />
+      <iframe className="canvas-home-frame w-full flex-1 bg-white" srcDoc={srcDoc} sandbox="allow-popups allow-popups-to-escape-sandbox" title={`${courseCode(course)} Canvas home`} />
     </div>
   );
 }

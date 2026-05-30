@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter
@@ -17,6 +18,9 @@ router = APIRouter()
 @router.get("/api/courses")
 async def courses() -> list[dict[str, Any]]:
     def query() -> list[dict[str, Any]]:
+        # "Ongoing schedule" = dated timeline points (assignments / calendar / announcements)
+        # that are not historical, mirroring the timeline view's >7-day-past cutoff.
+        threshold = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with state().db.connect() as conn:
             rows = conn.execute(
                 """
@@ -24,12 +28,32 @@ async def courses() -> list[dict[str, Any]]:
                        (SELECT COUNT(*) FROM announcements a WHERE a.course_id = c.id) AS announcement_count,
                        (SELECT COUNT(*) FROM assignments s WHERE s.course_id = c.id) AS assignment_count,
                        (SELECT COUNT(*) FROM files f WHERE f.course_id = c.id) AS file_count,
-                       (SELECT COUNT(*) FROM files f WHERE f.course_id = c.id AND f.backup_status = 'downloaded') AS downloaded_count
+                       (SELECT COUNT(*) FROM files f WHERE f.course_id = c.id AND f.backup_status = 'downloaded') AS downloaded_count,
+                       (
+                         (SELECT COUNT(*) FROM assignments s
+                          WHERE s.course_id = c.id AND s.due_at IS NOT NULL AND s.due_at >= ?)
+                         + (SELECT COUNT(*) FROM calendar_events e
+                          WHERE e.course_id = c.id AND COALESCE(e.start_at, e.end_at) IS NOT NULL AND COALESCE(e.start_at, e.end_at) >= ?)
+                         + (SELECT COUNT(*) FROM announcements a
+                          WHERE a.course_id = c.id AND a.posted_at IS NOT NULL AND a.posted_at >= ?)
+                       ) AS upcoming_count
                 FROM courses c
-                ORDER BY c.term_name DESC, c.name
-                """
+                """,
+                (threshold, threshold, threshold),
             ).fetchall()
-        return rows_to_dicts(rows)
+        items = rows_to_dicts(rows)
+        for item in items:
+            term = _parse_raw_json(item.pop("raw_json", None)).get("term") or {}
+            item["term_id"] = term.get("id")
+            item["term_start_at"] = term.get("start_at")
+            item["term_end_at"] = term.get("end_at")
+        # Sort by term start date (newest first), then course name; courses with
+        # no term sort last. term_name is NOT chronological -- "Semester B 2024/25"
+        # would sort above "Semester A 2025/26" -- so the frontend groups and
+        # orders semesters on these dates instead.
+        items.sort(key=lambda c: (c.get("name") or "").lower())
+        items.sort(key=lambda c: c.get("term_start_at") or "", reverse=True)
+        return items
 
     return await run_in_threadpool(query)
 

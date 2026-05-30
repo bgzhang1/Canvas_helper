@@ -18,6 +18,7 @@ import { AgentChatView } from './views/AgentChatView';
 import { SettingsView } from './views/SettingsView';
 import { courseCode, statusForCourse } from './utils/course';
 import { analysisStatusToProgress, idleAnalysisStatus, parseSyncProgress } from './utils/progress';
+import { useTermGroups } from './hooks/useTermGroups';
 
 export function App() {
   const navigate = useNavigate();
@@ -42,7 +43,15 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [mobileSystemOpen, setMobileSystemOpen] = useState(false);
   const [mobileCoursesOpen, setMobileCoursesOpen] = useState(false);
+  const [seenAnnouncements, setSeenAnnouncements] = useState<Record<number, number>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('canvasSeenAnnouncements') || '{}') as Record<number, number>;
+    } catch {
+      return {};
+    }
+  });
   const t = useCallback<TFunction>((key) => translate(lang, key), [lang]);
+  const courseGroups = useTermGroups(courses);
 
   const selectedCourse = useMemo(
     () => (selectedCourseId != null ? courses.find((course) => course.id === selectedCourseId) ?? null : null),
@@ -71,6 +80,50 @@ export function App() {
   useEffect(() => {
     loadInitial();
   }, []);
+
+  const markCourseAnnouncementsSeen = useCallback((courseId: number, count: number) => {
+    setSeenAnnouncements((prev) => {
+      if (prev[courseId] === count) return prev;
+      const next = { ...prev, [courseId]: count };
+      try {
+        localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
+      } catch {
+        /* ignore storage errors */
+      }
+      return next;
+    });
+  }, []);
+
+  // Baseline newly discovered courses to their current count, so only later
+  // increases (new announcements after a refresh) light up the red dot.
+  useEffect(() => {
+    if (courses.length === 0) return;
+    setSeenAnnouncements((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const course of courses) {
+        if (!(course.id in next)) {
+          next[course.id] = course.announcement_count;
+          changed = true;
+        }
+      }
+      if (changed) {
+        try {
+          localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
+        } catch {
+          /* ignore storage errors */
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [courses]);
+
+  // Viewing a course's announcements clears its "new" dot.
+  useEffect(() => {
+    if (currentView === 'course' && activeTab === 'announcements' && selectedCourse) {
+      markCourseAnnouncementsSeen(selectedCourse.id, selectedCourse.announcement_count);
+    }
+  }, [currentView, activeTab, selectedCourse, markCourseAnnouncementsSeen]);
 
   useEffect(() => {
     function markLink(link: HTMLAnchorElement) {
@@ -387,23 +440,45 @@ export function App() {
 
             {mobileCoursesOpen && (
               <div className="mobile-dropdown absolute left-0 right-0 top-11 max-h-[60vh] overflow-y-auto border-t border-b border-black bg-[#F4F4F0] shadow-[0_8px_0_0_rgba(0,0,0,0.16)] z-40">
-                {courses.map((course) => {
-                  const courseStatus = statusForCourse(course);
+                {courseGroups.groups.map((group) => {
+                  const open = courseGroups.isExpanded(group.key);
+                  const isCurrent = group.key === courseGroups.currentKey;
                   return (
-                    <button
-                      key={course.id}
-                      type="button"
-                      onClick={() => navigateMobile(`/course/${course.id}`)}
-                      className={`w-full flex items-center justify-between gap-3 border-b border-black px-4 py-3 text-left text-sm font-mono ${
-                        currentView === 'course' && selectedCourse?.id === course.id ? 'bg-black text-[#F4F4F0]' : 'bg-[#F4F4F0] text-black'
-                      }`}
-                    >
-                      <span className="flex items-center gap-3 min-w-0">
-                        <span className={`w-1.5 h-1.5 shrink-0 ${courseStatus === 'SYNCED' ? 'bg-current' : 'bg-gray-400 border border-current'}`} />
-                        <span className="truncate">{courseCode(course)}</span>
-                      </span>
-                      <ChevronRight size={13} className="shrink-0" />
-                    </button>
+                    <div key={group.key}>
+                      <button
+                        type="button"
+                        onClick={() => courseGroups.toggle(group.key)}
+                        aria-expanded={open}
+                        className="w-full flex items-center justify-between gap-2 border-b border-black px-4 py-2.5 text-left text-[11px] font-mono font-bold uppercase tracking-widest bg-[#E8E8E3] text-black"
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          {open ? <ChevronDown size={13} className="shrink-0" /> : <ChevronRight size={13} className="shrink-0" />}
+                          <span className="truncate">{group.termName ?? t('noTerm')}</span>
+                          {isCurrent && <span className="shrink-0 px-1 text-[9px] border border-black">{t('currentTermBadge')}</span>}
+                        </span>
+                        <span className="shrink-0 text-gray-500">{group.courses.length}</span>
+                      </button>
+                      {open &&
+                        group.courses.map((course) => {
+                          const courseStatus = statusForCourse(course);
+                          return (
+                            <button
+                              key={course.id}
+                              type="button"
+                              onClick={() => navigateMobile(`/course/${course.id}`)}
+                              className={`w-full flex items-center justify-between gap-3 border-b border-black px-4 py-3 pl-8 text-left text-sm font-mono ${
+                                currentView === 'course' && selectedCourse?.id === course.id ? 'bg-black text-[#F4F4F0]' : 'bg-[#F4F4F0] text-black'
+                              }`}
+                            >
+                              <span className="flex items-center gap-3 min-w-0">
+                                <span className={`w-1.5 h-1.5 shrink-0 ${courseStatus === 'SYNCED' ? 'bg-current' : 'bg-gray-400 border border-current'}`} />
+                                <span className="truncate">{courseCode(course)}</span>
+                              </span>
+                              <ChevronRight size={13} className="shrink-0" />
+                            </button>
+                          );
+                        })}
+                    </div>
                   );
                 })}
               </div>
@@ -436,24 +511,49 @@ export function App() {
 
           <div className="px-4 py-4 flex-1 overflow-y-auto">
             <div className="text-[10px] font-mono text-gray-500 tracking-widest mb-4 px-2">{t('activeTerm')}</div>
-            <div className="space-y-1">
-              {courses.map((course) => {
-                const courseStatus = statusForCourse(course);
+            <div className="space-y-3">
+              {courseGroups.groups.map((group) => {
+                const open = courseGroups.isExpanded(group.key);
+                const isCurrent = group.key === courseGroups.currentKey;
                 return (
-                  <button
-                    key={course.id}
-                    onClick={() => navigate(`/course/${course.id}`)}
-                    className={`w-full flex items-center justify-between px-4 py-2 border transition-none text-sm font-mono ${
-                      currentView === 'course' && selectedCourse?.id === course.id
-                        ? 'border-black bg-[#E8E8E3] font-bold'
-                        : 'border-transparent hover:border-black'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className={`w-1.5 h-1.5 shrink-0 ${courseStatus === 'SYNCED' ? 'bg-black' : 'bg-gray-400 border border-black'}`} />
-                      <span className="truncate tracking-wider">{courseCode(course)}</span>
-                    </div>
-                  </button>
+                  <div key={group.key}>
+                    <button
+                      type="button"
+                      onClick={() => courseGroups.toggle(group.key)}
+                      aria-expanded={open}
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[10px] font-mono font-bold tracking-widest text-gray-600 hover:text-black"
+                    >
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        {open ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+                        <span className="truncate">{group.termName ?? t('noTerm')}</span>
+                        {isCurrent && <span className="w-1.5 h-1.5 shrink-0 bg-black rounded-full" title={t('currentTermBadge')} />}
+                      </span>
+                      <span className="shrink-0 text-gray-400">{group.courses.length}</span>
+                    </button>
+                    {open && (
+                      <div className="space-y-1 mt-1">
+                        {group.courses.map((course) => {
+                          const courseStatus = statusForCourse(course);
+                          return (
+                            <button
+                              key={course.id}
+                              onClick={() => navigate(`/course/${course.id}`)}
+                              className={`w-full flex items-center justify-between px-4 py-2 border transition-none text-sm font-mono ${
+                                currentView === 'course' && selectedCourse?.id === course.id
+                                  ? 'border-black bg-[#E8E8E3] font-bold'
+                                  : 'border-transparent hover:border-black'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className={`w-1.5 h-1.5 shrink-0 ${courseStatus === 'SYNCED' ? 'bg-black' : 'bg-gray-400 border border-black'}`} />
+                                <span className="truncate tracking-wider">{courseCode(course)}</span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -537,7 +637,7 @@ export function App() {
             <Routes>
               <Route
                 path="/"
-                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} onSelectCourse={(course) => navigate(`/course/${course.id}`)} />}
+                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} />}
               />
               <Route
                 path="/agent"

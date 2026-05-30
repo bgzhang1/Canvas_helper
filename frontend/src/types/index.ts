@@ -3,12 +3,16 @@ export type Course = {
   name: string;
   course_code: string | null;
   term_name: string | null;
+  term_id: number | null;
+  term_start_at: string | null;
+  term_end_at: string | null;
   workflow_state: string | null;
   synced_at: string;
   announcement_count: number;
   assignment_count: number;
   file_count: number;
   downloaded_count: number;
+  upcoming_count: number;
 };
 
 export type Announcement = {

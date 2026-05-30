@@ -100,13 +100,32 @@ class SyncService:
             courses = await self.canvas.paginate(
                 "/api/v1/courses",
                 params={
-                    "enrollment_state": "active",
+                    # Do NOT filter by enrollment_state. Canvas reclassifies a
+                    # student's enrollments as "completed" once the course term
+                    # ends, so enrollment_state=active returns [] for every past
+                    # term -- which made the sync silently store zero courses
+                    # after the semester concluded. Fetch all enrollment states
+                    # and drop only the inaccessible stubs below.
                     "per_page": "100",
-                    "include[]": ["term"],
+                    "include[]": ["term", "syllabus_body"],
                 },
             )
+            # Canvas returns bare stubs (just {"id", "access_restricted_by_date"})
+            # for courses the user can no longer open due to date restrictions.
+            # Skip them so we don't persist empty "Untitled course" rows.
+            courses = [course for course in courses if not course.get("access_restricted_by_date")]
             if course_id is not None:
                 courses = [course for course in courses if int(course["id"]) == course_id]
+            elif target_course_id is None:
+                # Non-first syncs default to current term only
+                with self.db.connect() as conn:
+                    existing = conn.execute("SELECT COUNT(*) AS cnt FROM courses").fetchone()["cnt"]
+                if existing > 0:
+                    now = datetime.now(timezone.utc).isoformat()
+                    courses = [
+                        c for c in courses
+                        if self._is_current_term(c, now)
+                    ]
             total_courses = len(courses)
             steps_per_course = 6 if sync_files else 5
             metadata_steps = max(total_courses * steps_per_course, 1)
@@ -155,7 +174,7 @@ class SyncService:
                 complete_step("Synced assignments", course_index, course_name)
                 self._merge_sync_delta(counts, "calendar_events", await self._sync_calendar_events(course_id))
                 complete_step("Synced calendar events", course_index, course_name)
-                self._merge_sync_delta(counts, "pages", await self._sync_pages(course_id))
+                self._merge_sync_delta(counts, "pages", await self._sync_pages(course_id, course))
                 complete_step("Synced pages", course_index, course_name)
                 self._merge_sync_delta(counts, "people", await self._sync_people(course_id))
                 if sync_files:
@@ -264,7 +283,12 @@ class SyncService:
                 message="Sync task was cancelled.",
                 metadata={key: value for key, value in counts.items() if key != "progress"},
             )
-            return counts
+            # Re-raise: this branch handles task-level cancellation (server
+            # shutdown / uvicorn --reload). Swallowing it leaves the scheduler
+            # coroutine running, so lifespan's ``await scheduler_task`` never
+            # returns and graceful shutdown/reload hangs indefinitely. User-driven
+            # cancellation goes through SyncCancelled above and still returns.
+            raise
         except Exception as exc:
             progress = counts.get("progress") if isinstance(counts.get("progress"), dict) else {}
             counts["progress"] = {
@@ -580,7 +604,7 @@ class SyncService:
                 updated += 1
         return {"seen": len(items), "updated": updated, "unchanged": unchanged}
 
-    async def _sync_pages(self, course_id: int) -> dict[str, int]:
+    async def _sync_pages(self, course_id: int, course: dict | None = None) -> dict[str, int]:
         pages = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/pages",
             params={"per_page": "100"},
@@ -598,6 +622,17 @@ class SyncService:
                 except httpx.HTTPStatusError:
                     detail = page
             details.append((page, detail, page_url or str(page.get("page_id") or page.get("id"))))
+
+        # For courses with default_view=syllabus, store syllabus_body as a synthetic page
+        if course and course.get("default_view") == "syllabus" and course.get("syllabus_body"):
+            syllabus_detail = {
+                "title": "Syllabus",
+                "body": course["syllabus_body"],
+                "front_page": True,
+                "published": True,
+                "updated_at": course.get("created_at"),
+            }
+            details.append(({}, syllabus_detail, "__syllabus__"))
 
         updated = 0
         unchanged = 0
@@ -644,9 +679,11 @@ class SyncService:
         items = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/users",
             params={
+                # No enrollment_state filter: once a term concludes every
+                # enrollment is "completed", so filtering on "active" returned an
+                # empty roster (same root cause as the course query above).
                 "per_page": "100",
                 "include[]": ["email", "enrollments"],
-                "enrollment_state[]": ["active"],
             },
         )
         now = utc_now()
@@ -803,6 +840,18 @@ class SyncService:
             if key in redacted:
                 redacted[key] = None
         return redacted
+
+    def _is_current_term(self, course: dict, now_iso: str) -> bool:
+        term = course.get("term") or {}
+        start = term.get("start_at")
+        end = term.get("end_at")
+        if not start and not end:
+            return True  # no term dates = always include
+        if start and now_iso < start:
+            return False
+        if end and now_iso > end:
+            return False
+        return True
 
     async def _optional_paginate(self, path: str, params: dict) -> list:
         try:
