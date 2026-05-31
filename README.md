@@ -10,17 +10,19 @@ Canvas_helper 是一个本地 Canvas 课程资料助手，用来同步课程、�
 
 - 只读 Canvas 访问：后端 Canvas 客户端只允许 `GET` 和 `HEAD`，Token 不会暴露给浏览器。
 - 增量同步与本地备份：课程元数据、课件索引和选中文件可保存到本地 `data/` 目录。
+- 面包屑文件浏览器：重构了文件管理视图，支持按树形文件夹级别逐级导航，并支持通过面包屑快速返回上级目录，体验更佳。
 - 资料解析：支持 PDF、PPTX、DOCX、HTML、文本、ZIP 等资料的文本抽取，PDF 可按配置启用 OCR。
-- AI 课程分析：可接入 OpenAI-compatible API，把本地缓存和已抽取文本整理成课程时间线、摘要和问答上下文。
+- AI 课程分析与对话：支持展示实时流式“Thinking”思维链（可折叠），可视化工具调用（参数、执行进度），支持随时中断，并支持对话的删除与管理。
+- 动态模型选择与测试：内置 `/v1/models` 自动拉取与配置测试，可以直接在界面切换和连通性测试。
 - 通知能力：支持 Telegram 和邮件提醒；未配置 SMTP 时邮件会写入本地 outbox。
-- Windows 友好：内置启动脚本和计划任务脚本，可一键启动或登录后自动启动。
+- Windows 友好：内置一键启动脚本与计划任务，运行命令中默认开启 `-X utf8` 并重构标准流编码，有效防止非 ASCII 字符管道输出引起的 `UnicodeEncodeError` 崩溃。
 
 ## 技术栈
 
 - 后端：FastAPI、httpx、pydantic-settings、SQLite
 - 文件解析：PyMuPDF、python-pptx、python-docx、BeautifulSoup、Pillow、pytesseract（OCR）
-- 前端：React 19 + TypeScript、Vite、Tailwind CSS、lucide-react
-- AI：OpenAI-compatible `/v1/chat/completions` 接口
+- 前端：React 19 + TypeScript、Vite、Vanilla CSS、lucide-react
+- AI：OpenAI-compatible `/v1/chat/completions` 与 `/v1/models` 接口
 - 测试：pytest、pytest-asyncio、FastAPI TestClient、TypeScript build
 
 ## 安装

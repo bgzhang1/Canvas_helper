@@ -16,7 +16,15 @@ from ..runtime import (
     restart_scheduler,
     state,
 )
-from ..schemas import AISettingsIn, CanvasSettingsIn, CanvasSettingsTestIn, NotificationSettingsIn, SyncSettingsIn
+from ..schemas import (
+    AIModelIn,
+    AISettingsIn,
+    AISettingsTestIn,
+    CanvasSettingsIn,
+    CanvasSettingsTestIn,
+    NotificationSettingsIn,
+    SyncSettingsIn,
+)
 
 router = APIRouter()
 
@@ -78,6 +86,13 @@ async def test_canvas_settings(payload: CanvasSettingsTestIn) -> dict[str, Any]:
                 "username": None,
                 "message": str(exc),
             }
+        except httpx.RequestError as exc:
+            return {
+                "ok": False,
+                "canvas_base_url": state().settings.canvas_base_url,
+                "username": None,
+                "message": f"Canvas connection failed: {exc.__class__.__name__}: {exc}",
+            }
     username = profile.get("name") or profile.get("short_name") or profile.get("sortable_name") or profile.get("login_id")
     return {
         "ok": True,
@@ -115,6 +130,57 @@ async def put_ai_settings(payload: AISettingsIn) -> dict[str, Any]:
     if payload.api_key:
         values["ai.api_key"] = payload.api_key
     state().db.put_settings(values)
+    return get_ai_settings()
+
+
+def _ai_models_url(base_url: str) -> str:
+    base = (base_url or "").strip().rstrip("/")
+    low = base.lower()
+    if low.endswith("/chat/completions"):
+        return base[: -len("/chat/completions")] + "/models"
+    if low.endswith("/v1") or low.endswith("/openai/v1") or low.endswith("/v1/openai"):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+async def _fetch_ai_models(base_url: str | None, api_key: str | None) -> dict[str, Any]:
+    saved = get_ai_settings(include_secrets=True)
+    base = (base_url or saved["base_url"] or "").strip()
+    key = (api_key or saved.get("api_key") or "").strip()
+    if not base or not key:
+        return {"ok": False, "models": [], "message": "AI engine is not configured. Set COMPAT_BASE_URL and API_KEY first."}
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(_ai_models_url(base), headers={"Authorization": f"Bearer {key}"})
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        return {"ok": False, "models": [], "message": f"Provider returned HTTP {exc.response.status_code}."}
+    except httpx.RequestError as exc:
+        return {"ok": False, "models": [], "message": f"Connection failed: {exc.__class__.__name__}: {exc}"}
+    items = data.get("data") if isinstance(data, dict) else data
+    models = sorted({str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")}) if isinstance(items, list) else []
+    return {"ok": True, "models": models, "message": f"{len(models)} models available."}
+
+
+@router.post("/api/settings/ai/test")
+async def test_ai_settings(payload: AISettingsTestIn) -> dict[str, Any]:
+    result = await _fetch_ai_models(payload.base_url, payload.api_key)
+    return {"ok": result["ok"], "message": result["message"], "model_count": len(result["models"])}
+
+
+@router.get("/api/settings/ai/models")
+async def list_ai_models() -> dict[str, Any]:
+    return {**await _fetch_ai_models(None, None), "model": get_ai_settings()["model"]}
+
+
+@router.put("/api/settings/ai/model")
+async def put_ai_model(payload: AIModelIn) -> dict[str, Any]:
+    model = (payload.model or "").strip()
+    if model:
+        state().db.put_settings({"ai.model": model})
     return get_ai_settings()
 
 

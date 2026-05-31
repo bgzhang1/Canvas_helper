@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm:dev:backend\" \"npm:dev:frontend\"",
-    "dev:backend": "python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000",
+    "dev:backend": "python -X utf8 -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000",
     "dev:frontend": "npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173 --strictPort",
     "build": "npm --prefix frontend run build",
     "test:backend": "pytest"

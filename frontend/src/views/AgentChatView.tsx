@@ -1,12 +1,12 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, ChevronUp, MessageSquarePlus, RefreshCcw, Send, UserRound } from 'lucide-react';
+import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { Bot, ChevronDown, ChevronUp, MessageSquarePlus, RefreshCcw, Send, Square, Trash2, UserRound } from 'lucide-react';
 import type { AgentChatMessage, Course, EventLog } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { fetchAgentEventLogs, streamAgentMessage } from '../api/agent';
+import { fetchAIModels, saveAIModel } from '../api/settings';
 import { Badge, EmptyState } from '../components/ui';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { fmtDate } from '../utils/format';
-import { courseCode } from '../utils/course';
 import { eventActionLabel, eventLogBadgeVariant, eventStatusLabel } from '../utils/labels';
 
 type AgentChatSession = {
@@ -22,7 +22,6 @@ const SESSIONS_KEY = 'canvas.agent.sessions.v1';
 const ACTIVE_SESSION_KEY = 'canvas.agent.activeSession.v1';
 
 export function AgentChatView({
-  courses,
   selectedCourseId,
   setSelectedCourseId
 }: {
@@ -36,9 +35,15 @@ export function AgentChatView({
   const [activeSessionId, setActiveSessionId] = useState(initial.activeSessionId);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [queued, setQueued] = useState<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
   const [agentLogs, setAgentLogs] = useState<EventLog[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState('');
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [menu, setMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
@@ -64,6 +69,18 @@ export function AgentChatView({
     loadAgentLogs().catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    loadModels().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (sending || queued.length === 0) return;
+    const [next, ...rest] = queued;
+    setQueued(rest);
+    void sendMessage(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sending, queued]);
+
   async function loadAgentLogs() {
     setLoadingLogs(true);
     try {
@@ -75,8 +92,26 @@ export function AgentChatView({
     }
   }
 
-  function updateActiveSession(updater: (session: AgentChatSession) => AgentChatSession) {
-    setSessions((current) => current.map((session) => (session.id === activeSessionId ? updater(session) : session)));
+  async function loadModels() {
+    setLoadingModels(true);
+    try {
+      const result = await fetchAIModels();
+      setModels(result.models);
+      setModel(result.model);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
+  async function changeModel(next: string) {
+    setModel(next);
+    try {
+      await saveAIModel(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function startNewChat() {
@@ -95,53 +130,116 @@ export function AgentChatView({
     setError(null);
   }
 
-  function handleCourseChange(value: string) {
-    const courseId = value ? Number(value) : null;
-    setSelectedCourseId(courseId);
-    updateActiveSession((session) => ({ ...session, courseId, updatedAt: new Date().toISOString() }));
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (event: globalThis.KeyboardEvent) => event.key === 'Escape' && setMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menu]);
+
+  function openSessionMenu(event: MouseEvent, sessionId: string) {
+    event.preventDefault();
+    setMenu({ sessionId, x: event.clientX, y: event.clientY });
   }
 
-  async function submit(event?: FormEvent) {
+  function deleteSession(sessionId: string) {
+    setMenu(null);
+    const remaining = sessions.filter((session) => session.id !== sessionId);
+    if (remaining.length === 0) {
+      const fresh = createSession();
+      setSessions([fresh]);
+      setActiveSessionId(fresh.id);
+    } else {
+      setSessions(remaining);
+      if (sessionId === activeSessionId) setActiveSessionId(remaining[0].id);
+    }
+  }
+
+  function interrupt() {
+    abortRef.current?.abort();
+    setQueued([]);
+  }
+
+  function submit(event?: FormEvent) {
     event?.preventDefault();
     const content = draft.trim();
-    if (!content || sending || !activeSession) return;
+    if (!content || !activeSession) return;
+    setDraft('');
+    if (sending) {
+      setQueued((current) => [...current, content]);
+      return;
+    }
+    void sendMessage(content);
+  }
+
+  async function sendMessage(content: string) {
+    const session = sessions.find((item) => item.id === activeSessionId) ?? activeSession;
+    if (!session) return;
+    const sessionId = session.id;
     const now = new Date().toISOString();
-    const nextTitle = activeSession.messages.length === 0 ? titleFromMessage(content) : activeSession.title;
-    const nextMessages: AgentChatMessage[] = [...activeSession.messages, { role: 'user', content }];
+    const nextTitle = session.messages.length === 0 ? titleFromMessage(content) : session.title;
+    const nextMessages: AgentChatMessage[] = [...session.messages, { role: 'user', content }];
+    const controller = new AbortController();
+    abortRef.current = controller;
     setSessions((current) =>
-      current.map((session) =>
-        session.id === activeSession.id
-          ? { ...session, title: nextTitle, courseId: selectedCourseId, messages: nextMessages, updatedAt: now }
-          : session
+      current.map((item) =>
+        item.id === sessionId
+          ? { ...item, title: nextTitle, courseId: selectedCourseId, messages: [...nextMessages, { role: 'assistant', content: '', tools_used: [], status: 'streaming' }], updatedAt: now }
+          : item
       )
     );
-    setDraft('');
     setSending(true);
     setError(null);
     try {
-      const assistantPlaceholder: AgentChatMessage = { role: 'assistant', content: '', tools_used: [], status: 'streaming' };
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === activeSession.id
-            ? { ...session, messages: [...nextMessages, assistantPlaceholder], updatedAt: new Date().toISOString() }
-            : session
-        )
+      await streamAgentMessage(
+        content,
+        nextMessages,
+        selectedCourseId,
+        sessionId,
+        nextTitle,
+        {
+          onDelta: (chunk) => appendAssistantContent(sessionId, chunk),
+          onThinking: (chunk) => appendAssistantThinking(sessionId, chunk),
+          onTool: (tool) => updateAssistantStep(sessionId, tool),
+          onDone: (reply) => replaceAssistantMessage(sessionId, reply)
+        },
+        controller.signal
       );
-      await streamAgentMessage(content, nextMessages, selectedCourseId, activeSession.id, nextTitle, {
-        onDelta: (chunk) => appendAssistantContent(activeSession.id, chunk),
-        onTool: (tool) => addAssistantTool(activeSession.id, tool.name),
-        onDone: (reply) => replaceAssistantMessage(activeSession.id, reply)
-      });
       await loadAgentLogs();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setSessions((current) =>
-        current.map((session) => (session.id === activeSession.id ? { ...session, messages: nextMessages, updatedAt: now } : session))
-      );
+      if (controller.signal.aborted) {
+        finalizeStreamingMessage(sessionId);
+      } else {
+        const reason = err instanceof Error ? err.message : String(err);
+        setError(reason);
+        replaceAssistantMessage(sessionId, { role: 'assistant', content: reason, status: 'error' });
+      }
       await loadAgentLogs();
     } finally {
+      abortRef.current = null;
       setSending(false);
     }
+  }
+
+  function finalizeStreamingMessage(sessionId: string) {
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== sessionId) return session;
+        const messages = [...session.messages];
+        const last = messages[messages.length - 1];
+        if (last?.role === 'assistant' && last.status === 'streaming') {
+          messages[messages.length - 1] = { ...last, status: 'ok', steps: undefined, thinking: undefined };
+        }
+        return { ...session, messages, updatedAt: new Date().toISOString() };
+      })
+    );
   }
 
   function handleDraftKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -165,16 +263,38 @@ export function AgentChatView({
     );
   }
 
-  function addAssistantTool(sessionId: string, toolName: string) {
+  function appendAssistantThinking(sessionId: string, chunk: string) {
     setSessions((current) =>
       current.map((session) => {
         if (session.id !== sessionId) return session;
         const messages = [...session.messages];
         const last = messages[messages.length - 1];
         if (last?.role === 'assistant') {
-          const tools = new Set([...(last.tools_used ?? []), toolName]);
-          messages[messages.length - 1] = { ...last, tools_used: Array.from(tools) };
+          messages[messages.length - 1] = { ...last, thinking: `${last.thinking ?? ''}${chunk}` };
         }
+        return { ...session, messages, updatedAt: new Date().toISOString() };
+      })
+    );
+  }
+
+  function updateAssistantStep(sessionId: string, tool: { name: string; phase: 'start' | 'end'; ok: boolean; arguments?: Record<string, unknown> | null }) {
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== sessionId) return session;
+        const messages = [...session.messages];
+        const last = messages[messages.length - 1];
+        if (last?.role !== 'assistant') return session;
+        const steps = [...(last.steps ?? [])];
+        if (tool.phase === 'start') {
+          steps.push({ name: tool.name, status: 'running', args: tool.arguments ?? null });
+        } else {
+          const idx = steps.map((step) => step.name).lastIndexOf(tool.name);
+          const status = tool.ok ? 'ok' : 'error';
+          if (idx >= 0) steps[idx] = { name: tool.name, status, args: tool.arguments ?? steps[idx].args ?? null };
+          else steps.push({ name: tool.name, status, args: tool.arguments ?? null });
+        }
+        const tools = tool.ok ? Array.from(new Set([...(last.tools_used ?? []), tool.name])) : last.tools_used;
+        messages[messages.length - 1] = { ...last, steps, tools_used: tools };
         return { ...session, messages, updatedAt: new Date().toISOString() };
       })
     );
@@ -224,6 +344,8 @@ export function AgentChatView({
                   key={session.id}
                   type="button"
                   onClick={() => selectSession(session)}
+                  onContextMenu={(event) => openSessionMenu(event, session.id)}
+                  title={t('deleteChat')}
                   className={`w-full border px-3 py-2 text-left transition-none ${
                     session.id === activeSession?.id ? 'border-black bg-[#E8E8E3]' : 'border-transparent hover:border-black'
                   }`}
@@ -241,21 +363,30 @@ export function AgentChatView({
       </aside>
 
       <section className="agent-chat-panel min-w-0 min-h-0 flex flex-col gap-3">
-        <div className="agent-course-picker flex items-center justify-end gap-3">
+        <div className="flex items-center gap-2 border border-black bg-[#F4F4F0] px-3 py-2">
+          <label className="shrink-0 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500">{t('modelSelect')}</label>
           <select
-            value={selectedCourseId ?? ''}
-            onChange={(event) => handleCourseChange(event.target.value)}
-            className="border border-black bg-[#F4F4F0] px-3 py-2 text-xs font-mono uppercase outline-none focus:bg-white"
+            value={model}
+            onChange={(event) => void changeModel(event.target.value)}
+            className="min-w-0 flex-1 border border-black bg-white px-2 py-1 text-xs font-mono outline-none focus:bg-[#E8E8E3]"
           >
-            <option value="">{t('allCourses')}</option>
-            {courses.map((course) => (
-              <option key={course.id} value={course.id}>
-                {courseCode(course)}
+            {(model && !models.includes(model) ? [model, ...models] : models).length === 0 && <option value="">{t('notConfigured')}</option>}
+            {(model && !models.includes(model) ? [model, ...models] : models).map((item) => (
+              <option key={item} value={item}>
+                {item}
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={() => void loadModels()}
+            disabled={loadingModels}
+            className="h-7 w-7 shrink-0 border border-black flex items-center justify-center bg-white hover:bg-black hover:text-[#F4F4F0] disabled:text-gray-500"
+            aria-label={t('modelSelect')}
+          >
+            <RefreshCcw size={13} className={loadingModels ? 'animate-spin' : ''} />
+          </button>
         </div>
-
         <div className="relative flex-1 min-h-0 border border-black bg-[#F4F4F0] overflow-hidden">
           <div ref={scrollRef} className="h-full min-h-0 overflow-y-auto">
             {messages.length === 0 ? (
@@ -270,17 +401,46 @@ export function AgentChatView({
                       {message.role === 'user' ? <UserRound size={15} /> : <Bot size={15} />}
                     </div>
                     <div className="min-w-0">
-                      <div className="mb-2 text-[10px] font-mono font-bold uppercase tracking-widest">{message.role === 'user' ? t('you') : t('agent')}</div>
-                      <MarkdownContent content={message.content || (message.status === 'streaming' ? t('agentThinking') : '')} />
-                      {message.tools_used && message.tools_used.length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {message.tools_used.map((tool) => (
-                            <span key={tool} className="border border-black px-2 py-0.5 text-[10px] font-mono uppercase">
-                              {tool}
-                            </span>
-                          ))}
+                      <div className="mb-2 flex items-center gap-2 text-[10px] font-mono font-bold uppercase tracking-widest">
+                        <span>{message.role === 'user' ? t('you') : t('agent')}</span>
+                        {message.role === 'assistant' && message.status === 'streaming' && (
+                          <span className="animate-pulse text-gray-500">{t('agentWorking')}</span>
+                        )}
+                        {message.role === 'assistant' && message.status === 'error' && (
+                          <span className="text-red-700">{t('agentFailed')}</span>
+                        )}
+                      </div>
+                      {message.thinking && (
+                        <details className="mb-2 border border-dashed border-gray-400 bg-white/50 p-2" open={message.status === 'streaming'}>
+                          <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-gray-500">{t('agentThinking')}</summary>
+                          <div className="mt-2 whitespace-pre-wrap text-[11px] font-mono text-gray-600">{message.thinking}</div>
+                        </details>
+                      )}
+                      {message.steps && message.steps.length > 0 && (
+                        <div className="mb-2 space-y-1">
+                          {message.steps.map((step, stepIndex) => {
+                            const icon = step.status === 'running' ? '⏳' : step.status === 'ok' ? '✓' : '✗';
+                            const detail = step.args && Object.keys(step.args).length > 0 ? JSON.stringify(step.args, null, 2) : null;
+                            const label = (
+                              <>
+                                <span>{icon}</span>
+                                <span className={step.status === 'running' ? 'animate-pulse' : ''}>{step.name}</span>
+                              </>
+                            );
+                            return detail ? (
+                              <details key={`${step.name}-${stepIndex}`} className="text-[10px] font-mono uppercase tracking-widest text-gray-600">
+                                <summary className="flex cursor-pointer items-center gap-2">{label}</summary>
+                                <pre className="ml-5 mt-1 whitespace-pre-wrap break-all border border-dashed border-gray-400 bg-white/60 p-2 text-[10px] normal-case tracking-normal text-gray-700">{detail}</pre>
+                              </details>
+                            ) : (
+                              <div key={`${step.name}-${stepIndex}`} className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-gray-600">
+                                {label}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
+                      <MarkdownContent content={message.content} />
                     </div>
                   </div>
                 ))}
@@ -331,10 +491,16 @@ export function AgentChatView({
                         <Badge variant={eventLogBadgeVariant(event.status)}>{eventStatusLabel(event.status, t)}</Badge>
                         <span className="text-[10px] font-mono text-gray-500">{fmtDate(event.created_at)}</span>
                       </div>
-                      <div className="truncate text-[11px] font-mono font-bold">{eventActionLabel(event.action, t)}</div>
-                      {(event.item_name || event.message) && (
-                        <div className="mt-1 line-clamp-2 text-[10px] font-mono text-gray-600">{event.item_name || event.message}</div>
+                      <div className="truncate text-[11px] font-mono font-bold">
+                        {eventActionLabel(event.action, t)}
+                        {event.item_name ? ` · ${event.item_name}` : ''}
+                      </div>
+                      {event.message && (
+                        <div className="mt-1 line-clamp-3 break-all text-[10px] font-mono text-red-700">{event.message}</div>
                       )}
+                      {eventDetailLines(event).map((line, lineIndex) => (
+                        <div key={lineIndex} className="mt-1 break-all text-[10px] font-mono text-gray-600">{line}</div>
+                      ))}
                     </div>
                   ))
                 )}
@@ -343,25 +509,60 @@ export function AgentChatView({
           </div>
         </div>
 
-        <form onSubmit={submit} className="agent-compose flex gap-2">
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={handleDraftKeyDown}
-            rows={2}
-            placeholder={t('agentInputPlaceholder')}
-            className="min-h-[56px] flex-1 resize-none border border-black bg-white px-4 py-2 text-sm font-mono outline-none focus:bg-[#E8E8E3]"
-          />
-          <button
-            type="submit"
-            disabled={!draft.trim() || sending}
-            className="w-16 shrink-0 border border-black bg-black text-[#F4F4F0] flex items-center justify-center hover:bg-[#F4F4F0] hover:text-black disabled:bg-[#E8E8E3] disabled:text-gray-500 disabled:cursor-wait"
-            aria-label={t('sendMessage')}
-          >
-            <Send size={18} />
-          </button>
+        <form onSubmit={submit} className="agent-compose flex flex-col gap-1">
+          {queued.length > 0 && (
+            <div className="text-[10px] font-mono uppercase tracking-widest text-gray-500">
+              {t('queuedCount')}: {queued.length}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={handleDraftKeyDown}
+              rows={2}
+              placeholder={t('agentInputPlaceholder')}
+              className="min-h-[56px] flex-1 resize-none border border-black bg-white px-4 py-2 text-sm font-mono outline-none focus:bg-[#E8E8E3]"
+            />
+            {sending && (
+              <button
+                type="button"
+                onClick={interrupt}
+                className="w-16 shrink-0 border border-black bg-white text-black flex items-center justify-center hover:bg-black hover:text-[#F4F4F0]"
+                aria-label={t('interruptAgent')}
+                title={t('interruptAgent')}
+              >
+                <Square size={16} />
+              </button>
+            )}
+            <button
+              type="submit"
+              disabled={!draft.trim()}
+              className="w-16 shrink-0 border border-black bg-black text-[#F4F4F0] flex items-center justify-center hover:bg-[#F4F4F0] hover:text-black disabled:bg-[#E8E8E3] disabled:text-gray-500"
+              aria-label={t('sendMessage')}
+            >
+              <Send size={18} />
+            </button>
+          </div>
         </form>
       </section>
+
+      {menu && (
+        <div
+          className="fixed z-50 border border-black bg-white shadow-md"
+          style={{ top: menu.y, left: menu.x }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => deleteSession(menu.sessionId)}
+            className="flex items-center gap-2 px-3 py-2 text-[11px] font-mono uppercase tracking-widest text-red-700 hover:bg-black hover:text-[#F4F4F0]"
+          >
+            <Trash2 size={13} />
+            {t('deleteChat')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -407,6 +608,17 @@ function createId() {
 
 function titleFromMessage(message: string) {
   return message.replace(/\s+/g, ' ').slice(0, 56) || 'New chat';
+}
+
+function eventDetailLines(event: EventLog): string[] {
+  const meta = event.metadata ?? {};
+  const lines: string[] = [];
+  if (meta.arguments && typeof meta.arguments === 'object') lines.push(`args: ${JSON.stringify(meta.arguments)}`);
+  if (meta.status_code !== undefined) lines.push(`code: ${String(meta.status_code)}`);
+  else if (typeof meta.error_type === 'string') lines.push(`type: ${meta.error_type}`);
+  if (typeof meta.response_body === 'string' && meta.response_body) lines.push(`body: ${meta.response_body}`);
+  if (Array.isArray(meta.tools_used) && meta.tools_used.length > 0) lines.push(`tools: ${meta.tools_used.join(', ')}`);
+  return lines;
 }
 
 function isStoredSession(value: AgentChatSession) {

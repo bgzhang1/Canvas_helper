@@ -1,20 +1,37 @@
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
+import logging
 import os
+import random
 import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import httpx
 
 
+logger = logging.getLogger("canvas_ai_agent")
+
+# Transient HTTP statuses worth retrying (rate limit + transient upstream faults).
+# 4xx codes handled by `_degrade_request` (400/404/422) are intentionally excluded.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+# Replacement marker for older tool results dropped during context compaction.
+_COMPACTED_TOOL_CONTENT = '{"note":"[older tool result omitted to fit the context budget]"}'
+
 ToolHandler = Callable[[dict[str, Any]], Any]
+
+
+class AgentCancelled(RuntimeError):
+    """Raised cooperatively when a caller requests cancellation of an agent run."""
 
 
 @dataclass(frozen=True)
@@ -25,6 +42,21 @@ class AgentConfig:
     reasoning_effort: str = "medium"
     max_tool_rounds: int = 4
     timeout_seconds: float = 120.0
+    tool_timeout_seconds: float = 30.0
+    max_retries: int = 2
+    retry_base_delay: float = 0.5
+    retry_max_delay: float = 8.0
+    max_context_chars: int = 400_000
+
+
+@dataclass
+class _RequestFlags:
+    """Optional request features that may be dropped progressively on 4xx rejection."""
+
+    tools: bool
+    reasoning: bool
+    response_format: bool = False
+    temperature: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,6 +97,8 @@ class AgentRunResult:
     content: str
     tool_events: list[AgentToolEvent] = field(default_factory=list)
     fallback_without_tools: bool = False
+    usage: dict[str, int] = field(default_factory=dict)
+    cancelled: bool = False
 
     @property
     def tools_used(self) -> list[str]:
@@ -85,6 +119,9 @@ class ToolRegistry:
     def openai_tools(self) -> list[dict[str, Any]]:
         return [tool.to_openai_tool() for tool in self._tools.values()]
 
+    def get(self, name: str) -> AgentTool | None:
+        return self._tools.get(name)
+
     def call(self, name: str, arguments: dict[str, Any]) -> AgentToolEvent:
         tool = self._tools.get(name)
         if not tool:
@@ -93,6 +130,14 @@ class ToolRegistry:
             return AgentToolEvent(name=name, arguments=arguments, ok=True, result=tool.handler(arguments))
         except Exception as exc:
             return AgentToolEvent(name=name, arguments=arguments, ok=False, error=f"{exc.__class__.__name__}: {exc}")
+
+    async def call_async(self, name: str, arguments: dict[str, Any], timeout: float = 30.0) -> AgentToolEvent:
+        if name not in self._tools:
+            return AgentToolEvent(name=name, arguments=arguments, ok=False, error=f"Unknown tool: {name}")
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self.call, name, arguments), timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            return AgentToolEvent(name=name, arguments=arguments, ok=False, error=f"Tool '{name}' timed out after {timeout:.0f}s")
 
 
 class SkillRegistry:
@@ -131,10 +176,16 @@ class OpenAICompatAgent:
         *,
         skills: SkillRegistry | None = None,
         client: httpx.AsyncClient | None = None,
+        before_tool_call: Callable[[str, dict[str, Any]], dict[str, Any] | None] | None = None,
+        after_tool_call: Callable[[AgentToolEvent], AgentToolEvent | None] | None = None,
+        transform_context: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     ):
         self.config = config
         self.skills = skills or SkillRegistry()
         self._client = client
+        self.before_tool_call = before_tool_call
+        self.after_tool_call = after_tool_call
+        self.transform_context = transform_context
 
     async def run(
         self,
@@ -144,6 +195,7 @@ class OpenAICompatAgent:
         tools: list[AgentTool] | None = None,
         response_format_json: bool = False,
         temperature: float = 0.2,
+        cancel_check: Callable[[], None] | None = None,
     ) -> AgentRunResult:
         registry = ToolRegistry(tools)
         skill_prompt = self.skills.render_prompt()
@@ -152,81 +204,95 @@ class OpenAICompatAgent:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ]
         events: list[AgentToolEvent] = []
-        tools_enabled = bool(tools)
+        usage: dict[str, int] = {}
+        flags = _RequestFlags(
+            tools=bool(tools),
+            reasoning=bool(self.config.reasoning_effort),
+            response_format=response_format_json,
+        )
         fallback_without_tools = False
-        reasoning_enabled = bool(self.config.reasoning_effort)
 
-        for _round in range(max(1, self.config.max_tool_rounds)):
-            try:
-                message = await self._chat_completion(
-                    messages,
-                    registry.openai_tools() if tools_enabled else None,
-                    response_format_json=response_format_json,
-                    temperature=temperature,
-                    reasoning_effort=self.config.reasoning_effort if reasoning_enabled else None,
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in {400, 404, 422}:
-                    # Degrade in order: drop tools first (most common incompatibility),
-                    # then drop reasoning_effort, before giving up.
-                    if tools_enabled:
-                        tools_enabled = False
-                        fallback_without_tools = True
+        try:
+            async with self._session_client() as client:
+                round_index = 0
+                max_tool_rounds = max(1, self.config.max_tool_rounds)
+                while round_index < max_tool_rounds:
+                    _raise_if_cancelled(cancel_check)
+                    logger.debug("agent run round=%d flags=%s", round_index + 1, flags)
+                    try:
+                        message, round_usage = await self._chat_completion(
+                            client,
+                            self._prepare_context(messages),
+                            registry.openai_tools() if flags.tools else None,
+                            response_format_json=response_format_json and flags.response_format,
+                            temperature=temperature if flags.temperature else None,
+                            reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+                        )
+                    except httpx.HTTPStatusError as exc:
+                        degraded = _degrade_request(exc, flags)
+                        if degraded is None:
+                            logger.error("agent run failed with non-degradable error: %s", exc)
+                            raise
+                        if flags.tools and not degraded.tools:
+                            fallback_without_tools = True
+                        logger.warning("agent degrading after status=%s %s->%s", exc.response.status_code, flags, degraded)
+                        flags = degraded
                         continue
-                    if reasoning_enabled:
-                        reasoning_enabled = False
-                        continue
-                raise
 
-            tool_calls = message.get("tool_calls") or []
-            if not tool_calls:
-                return AgentRunResult(
-                    content=_message_content(message),
-                    tool_events=events,
-                    fallback_without_tools=fallback_without_tools,
-                )
+                    _merge_usage(usage, round_usage)
+                    tool_calls = message.get("tool_calls") or []
+                    if not tool_calls:
+                        content = _message_content(message)
+                        if not content.strip():
+                            content = _fallback_tool_response(events, response_format_json=response_format_json)
+                        return AgentRunResult(content, events, fallback_without_tools, usage)
 
-            messages.append(_assistant_tool_message(message, tool_calls))
-            for tool_call in tool_calls:
-                if tool_call.get("type") != "function":
-                    continue
-                function = tool_call.get("function") or {}
-                name = str(function.get("name") or "")
-                arguments = _parse_tool_arguments(function.get("arguments"))
-                event = registry.call(name, arguments)
-                events.append(event)
+                    round_index += 1
+                    messages.append(_assistant_tool_message(message, tool_calls))
+                    _raise_if_cancelled(cancel_check)
+                    for tool_call, name, event in await self._dispatch_tool_calls(registry, tool_calls):
+                        events.append(event)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.get("id"),
+                                "name": name,
+                                "content": _truncate_json({"ok": event.ok, "result": event.result, "error": event.error}),
+                            }
+                        )
+
+                logger.info("agent tool budget exhausted after %d round(s)", max(1, self.config.max_tool_rounds))
+                _raise_if_cancelled(cancel_check)
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tool_call.get("id"),
-                        "name": name,
-                        "content": _truncate_json(
-                            {
-                                "ok": event.ok,
-                                "result": event.result,
-                                "error": event.error,
-                            }
-                        ),
+                        "role": "system",
+                        "content": "Tool budget exhausted. Produce the final answer now without requesting more tools.",
                     }
                 )
-
-        messages.append(
-            {
-                "role": "system",
-                "content": "Tool budget exhausted. Produce the final answer now without requesting more tools.",
-            }
-        )
-        message = await self._chat_completion(
-            messages,
-            None,
-            response_format_json=response_format_json,
-            temperature=temperature,
-            reasoning_effort=self.config.reasoning_effort if reasoning_enabled else None,
-        )
+                message, round_usage = await self._chat_completion(
+                    client,
+                    self._prepare_context(messages),
+                    None,
+                    response_format_json=response_format_json and flags.response_format,
+                    temperature=temperature if flags.temperature else None,
+                    reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+                )
+                _merge_usage(usage, round_usage)
+        except AgentCancelled:
+            logger.info("agent run cancelled by caller")
+            return AgentRunResult(
+                _fallback_tool_response(events, response_format_json=response_format_json),
+                events,
+                fallback_without_tools,
+                usage,
+                cancelled=True,
+            )
+        content = _message_content(message)
         return AgentRunResult(
-            content=_message_content(message),
-            tool_events=events,
-            fallback_without_tools=fallback_without_tools,
+            content if content.strip() else _fallback_tool_response(events, response_format_json=response_format_json),
+            events,
+            fallback_without_tools,
+            usage,
         )
 
     async def run_stream(
@@ -237,6 +303,7 @@ class OpenAICompatAgent:
         tools: list[AgentTool] | None = None,
         response_format_json: bool = False,
         temperature: float = 0.2,
+        cancel_check: Callable[[], None] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         registry = ToolRegistry(tools)
         skill_prompt = self.skills.render_prompt()
@@ -245,180 +312,339 @@ class OpenAICompatAgent:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ]
         events: list[AgentToolEvent] = []
-        tools_enabled = bool(tools)
+        usage: dict[str, int] = {}
+        flags = _RequestFlags(
+            tools=bool(tools),
+            reasoning=bool(self.config.reasoning_effort),
+            response_format=response_format_json,
+        )
         fallback_without_tools = False
-        reasoning_enabled = bool(self.config.reasoning_effort)
+        content_parts: list[str] = []
 
-        for _round in range(max(1, self.config.max_tool_rounds)):
-            content_parts: list[str] = []
-            tool_call_parts: dict[int, dict[str, Any]] = {}
-            try:
-                async for chunk in self._chat_completion_stream(
-                    messages,
-                    registry.openai_tools() if tools_enabled else None,
-                    response_format_json=response_format_json,
-                    temperature=temperature,
-                    reasoning_effort=self.config.reasoning_effort if reasoning_enabled else None,
-                ):
-                    delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}) if isinstance(chunk, dict) else {}
-                    content_delta = _message_content(delta)
-                    if content_delta:
-                        content_parts.append(content_delta)
-                        yield {"type": "delta", "content": content_delta}
-                    _merge_stream_tool_call_parts(tool_call_parts, delta.get("tool_calls") or [])
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in {400, 404, 422}:
-                    # Degrade in order: drop tools first (most common incompatibility),
-                    # then drop reasoning_effort, before giving up.
-                    if tools_enabled:
-                        tools_enabled = False
-                        fallback_without_tools = True
+        def done_event(content: str, *, cancelled: bool = False) -> dict[str, Any]:
+            result = AgentRunResult(
+                content if content.strip() else _fallback_tool_response(events, response_format_json=response_format_json),
+                events,
+                fallback_without_tools,
+                usage,
+                cancelled=cancelled,
+            )
+            return {
+                "type": "done",
+                "content": result.content,
+                "tools_used": result.tools_used,
+                "tool_events": [_tool_event_payload(event) for event in result.tool_events],
+                "fallback_without_tools": result.fallback_without_tools,
+                "usage": result.usage,
+                "cancelled": result.cancelled,
+            }
+
+        try:
+            async with self._session_client() as client:
+                round_index = 0
+                max_tool_rounds = max(1, self.config.max_tool_rounds)
+                while round_index < max_tool_rounds:
+                    _raise_if_cancelled(cancel_check)
+                    content_parts = []
+                    tool_call_parts: dict[int, dict[str, Any]] = {}
+                    stream_interrupted = False
+                    try:
+                        async for chunk in self._chat_completion_stream(
+                            client,
+                            self._prepare_context(messages),
+                            registry.openai_tools() if flags.tools else None,
+                            response_format_json=response_format_json and flags.response_format,
+                            temperature=temperature if flags.temperature else None,
+                            reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+                        ):
+                            if isinstance(chunk, dict) and chunk.get("usage"):
+                                _merge_usage(usage, chunk["usage"])
+                            delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}) if isinstance(chunk, dict) else {}
+                            reasoning_delta = _message_reasoning(delta)
+                            if reasoning_delta:
+                                yield {"type": "thinking", "content": reasoning_delta}
+                            content_delta = _message_content(delta)
+                            if content_delta:
+                                content_parts.append(content_delta)
+                                yield {"type": "delta", "content": content_delta}
+                            _merge_stream_tool_call_parts(tool_call_parts, delta.get("tool_calls") or [])
+                    except httpx.HTTPStatusError as exc:
+                        degraded = _degrade_request(exc, flags)
+                        if degraded is None:
+                            logger.error("agent stream failed with non-degradable error: %s", exc)
+                            raise
+                        if flags.tools and not degraded.tools:
+                            fallback_without_tools = True
+                        logger.warning("agent stream degrading after status=%s %s->%s", exc.response.status_code, flags, degraded)
+                        flags = degraded
                         continue
-                    if reasoning_enabled:
-                        reasoning_enabled = False
-                        continue
-                raise
+                    except (httpx.TransportError, httpx.TimeoutException) as exc:
+                        if tool_call_parts:
+                            stream_interrupted = True
+                            logger.warning("agent stream interrupted after tool call deltas; using received tool calls: %s", exc)
+                        elif content_parts or events:
+                            logger.warning("agent stream interrupted after partial output; returning partial result: %s", exc)
+                            yield done_event("".join(content_parts))
+                            return
+                        else:
+                            raise
 
-            content = "".join(content_parts)
-            tool_calls = _finalize_stream_tool_calls(tool_call_parts)
-            if not tool_calls:
-                result = AgentRunResult(content=content, tool_events=events, fallback_without_tools=fallback_without_tools)
-                yield {
-                    "type": "done",
-                    "content": result.content,
-                    "tools_used": result.tools_used,
-                    "tool_events": [_tool_event_payload(event) for event in result.tool_events],
-                    "fallback_without_tools": result.fallback_without_tools,
-                }
-                return
+                    content = "".join(content_parts)
+                    tool_calls = _finalize_stream_tool_calls(tool_call_parts)
+                    if not tool_calls:
+                        if stream_interrupted and not content.strip():
+                            yield done_event("The model stream was interrupted before a complete answer was received.")
+                            return
+                        yield done_event(content)
+                        return
 
-            messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-            for tool_call in tool_calls:
-                if tool_call.get("type") != "function":
-                    continue
-                function = tool_call.get("function") or {}
-                name = str(function.get("name") or "")
-                arguments = _parse_tool_arguments(function.get("arguments"))
-                event = registry.call(name, arguments)
-                events.append(event)
-                yield {"type": "tool", **_tool_event_payload(event)}
+                    round_index += 1
+                    messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+                    for tool_call in tool_calls:
+                        if tool_call.get("type") != "function":
+                            continue
+                        function = tool_call.get("function") or {}
+                        yield {
+                            "type": "tool",
+                            "phase": "start",
+                            "name": str(function.get("name") or ""),
+                            "arguments": _parse_tool_arguments(function.get("arguments")),
+                        }
+                    _raise_if_cancelled(cancel_check)
+                    for tool_call, name, event in await self._dispatch_tool_calls(registry, tool_calls):
+                        events.append(event)
+                        yield {"type": "tool", "phase": "end", **_tool_event_payload(event)}
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.get("id"),
+                                "name": name,
+                                "content": _truncate_json({"ok": event.ok, "result": event.result, "error": event.error}),
+                            }
+                        )
+
+                logger.info("agent stream tool budget exhausted after %d round(s)", max(1, self.config.max_tool_rounds))
+                _raise_if_cancelled(cancel_check)
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tool_call.get("id"),
-                        "name": name,
-                        "content": _truncate_json(
-                            {
-                                "ok": event.ok,
-                                "result": event.result,
-                                "error": event.error,
-                            }
-                        ),
+                        "role": "system",
+                        "content": "Tool budget exhausted. Produce the final answer now without requesting more tools.",
                     }
                 )
+                content_parts = []
+                try:
+                    async for chunk in self._chat_completion_stream(
+                        client,
+                        self._prepare_context(messages),
+                        None,
+                        response_format_json=response_format_json and flags.response_format,
+                        temperature=temperature if flags.temperature else None,
+                        reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+                    ):
+                        if isinstance(chunk, dict) and chunk.get("usage"):
+                            _merge_usage(usage, chunk["usage"])
+                        delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}) if isinstance(chunk, dict) else {}
+                        reasoning_delta = _message_reasoning(delta)
+                        if reasoning_delta:
+                            yield {"type": "thinking", "content": reasoning_delta}
+                        content_delta = _message_content(delta)
+                        if content_delta:
+                            content_parts.append(content_delta)
+                            yield {"type": "delta", "content": content_delta}
+                except (httpx.TransportError, httpx.TimeoutException) as exc:
+                    if content_parts or events:
+                        logger.warning("agent stream interrupted during final answer; returning partial result: %s", exc)
+                        yield done_event("".join(content_parts))
+                        return
+                    raise
+        except AgentCancelled:
+            logger.info("agent stream cancelled by caller")
+            yield done_event("".join(content_parts), cancelled=True)
+            return
+        yield done_event("".join(content_parts))
 
-        messages.append(
-            {
-                "role": "system",
-                "content": "Tool budget exhausted. Produce the final answer now without requesting more tools.",
-            }
-        )
-        content_parts = []
-        async for chunk in self._chat_completion_stream(
-            messages,
-            None,
-            response_format_json=response_format_json,
-            temperature=temperature,
-            reasoning_effort=self.config.reasoning_effort if reasoning_enabled else None,
-        ):
-            delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}) if isinstance(chunk, dict) else {}
-            content_delta = _message_content(delta)
-            if content_delta:
-                content_parts.append(content_delta)
-                yield {"type": "delta", "content": content_delta}
-        result = AgentRunResult(content="".join(content_parts), tool_events=events, fallback_without_tools=fallback_without_tools)
-        yield {
-            "type": "done",
-            "content": result.content,
-            "tools_used": result.tools_used,
-            "tool_events": [_tool_event_payload(event) for event in result.tool_events],
-            "fallback_without_tools": result.fallback_without_tools,
-        }
+    @asynccontextmanager
+    async def _session_client(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield a client reused across all rounds of one run to avoid per-round TCP/TLS setup."""
+        if self._client is not None:
+            yield self._client
+            return
+        async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+            yield client
+
+    def _prepare_context(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply an optional context transform, then size-bounded compaction, before sending."""
+        if self.transform_context:
+            try:
+                transformed = self.transform_context(messages)
+                if isinstance(transformed, list):
+                    messages = transformed
+            except Exception as exc:  # a hook must never break the run
+                logger.warning("transform_context hook failed, using untransformed context: %s", exc)
+        return _compact_messages(messages, self.config.max_context_chars)
+
+    async def _dispatch_tool_calls(
+        self, registry: "ToolRegistry", tool_calls: list[dict[str, Any]]
+    ) -> list[tuple[dict[str, Any], str, AgentToolEvent]]:
+        """Run a round's function tool calls concurrently, preserving assistant call order.
+
+        Applies (in order): the optional before-hook gate, JSON-schema argument validation,
+        execution with timeout, then the optional after-hook override.
+        """
+        functions = [call for call in tool_calls if call.get("type") == "function"]
+
+        async def run_one(call: dict[str, Any]) -> tuple[dict[str, Any], str, AgentToolEvent]:
+            function = call.get("function") or {}
+            name = str(function.get("name") or "")
+            arguments = _parse_tool_arguments(function.get("arguments"))
+            event = await self._run_single_tool(registry, name, arguments)
+            if self.after_tool_call:
+                try:
+                    overridden = self.after_tool_call(event)
+                    if isinstance(overridden, AgentToolEvent):
+                        event = overridden
+                except Exception as exc:
+                    logger.warning("after_tool_call hook failed for %s: %s", name, exc)
+            logger.info("agent tool name=%s ok=%s error=%s", name or "?", event.ok, event.error or "-")
+            return call, name, event
+
+        return list(await asyncio.gather(*(run_one(call) for call in functions)))
+
+    async def _run_single_tool(self, registry: "ToolRegistry", name: str, arguments: dict[str, Any]) -> AgentToolEvent:
+        if self.before_tool_call:
+            try:
+                decision = self.before_tool_call(name, arguments)
+            except Exception as exc:
+                logger.warning("before_tool_call hook failed for %s: %s", name, exc)
+                decision = None
+            if decision and decision.get("block"):
+                return AgentToolEvent(name=name, arguments=arguments, ok=False, error=decision.get("reason") or f"Tool '{name}' blocked by policy")
+        tool = registry.get(name)
+        if tool is not None:
+            schema_error = _validate_tool_arguments(tool.parameters, arguments)
+            if schema_error:
+                return AgentToolEvent(name=name, arguments=arguments, ok=False, error=f"Invalid arguments: {schema_error}")
+        return await registry.call_async(name, arguments, timeout=self.config.tool_timeout_seconds)
+
+    def _build_request(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        *,
+        response_format_json: bool,
+        temperature: float | None,
+        reasoning_effort: str | None,
+        stream: bool,
+    ) -> tuple[str, dict[str, Any], dict[str, str]]:
+        url = _completions_url(self.config.base_url)
+        body: dict[str, Any] = {"model": self.config.model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
+        if stream:
+            body["stream"] = True
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        if response_format_json:
+            body["response_format"] = {"type": "json_object"}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        key = (self.config.api_key or "").strip()
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+        return url, body, {"Authorization": f"Bearer {key}"}
+
+    async def _sleep_backoff(self, attempt: int, response: httpx.Response | None, *, reason: str) -> None:
+        delay = min(self.config.retry_base_delay * (2**attempt), self.config.retry_max_delay)
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            delay = min(max(delay, retry_after), self.config.retry_max_delay)
+        delay += random.uniform(0, self.config.retry_base_delay)
+        logger.warning("agent retrying chat completion attempt=%d delay=%.2fs reason=%s", attempt + 1, delay, reason)
+        await asyncio.sleep(delay)
 
     async def _chat_completion(
         self,
+        client: httpx.AsyncClient,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         *,
         response_format_json: bool,
-        temperature: float,
+        temperature: float | None,
         reasoning_effort: str | None = None,
-    ) -> dict[str, Any]:
-        base = self.config.base_url.rstrip("/")
-        completions_url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
-        body: dict[str, Any] = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": temperature,
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        if response_format_json:
-            body["response_format"] = {"type": "json_object"}
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
-
-        headers = {"Authorization": f"Bearer {self.config.api_key}"}
-        if self._client:
-            response = await self._client.post(completions_url, headers=headers, json=body)
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        url, body, headers = self._build_request(
+            messages,
+            tools,
+            response_format_json=response_format_json,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            stream=False,
+        )
+        attempt = 0
+        while True:
+            try:
+                response = await client.post(url, headers=headers, json=body)
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                if attempt >= self.config.max_retries:
+                    logger.error("agent chat completion network error, giving up after %d retries: %s", attempt, exc)
+                    raise
+                await self._sleep_backoff(attempt, None, reason=exc.__class__.__name__)
+                attempt += 1
+                continue
+            if response.status_code in _RETRYABLE_STATUS and attempt < self.config.max_retries:
+                await response.aread()
+                await self._sleep_backoff(attempt, response, reason=f"status {response.status_code}")
+                attempt += 1
+                continue
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]
-
-        async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
-            response = await client.post(completions_url, headers=headers, json=body)
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise httpx.HTTPError("Provider returned no choices in chat completion response")
+            return choices[0].get("message") or {}, data.get("usage") or {}
 
     async def _chat_completion_stream(
         self,
+        client: httpx.AsyncClient,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         *,
         response_format_json: bool,
-        temperature: float,
+        temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        base = self.config.base_url.rstrip("/")
-        completions_url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
-        body: dict[str, Any] = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": True,
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        if response_format_json:
-            body["response_format"] = {"type": "json_object"}
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
-
-        headers = {"Authorization": f"Bearer {self.config.api_key}"}
-
-        if self._client:
-            async with self._client.stream("POST", completions_url, headers=headers, json=body) as response:
-                response.raise_for_status()
-                async for chunk in _iter_sse_json(response):
-                    yield chunk
-            return
-
-        async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
-            async with client.stream("POST", completions_url, headers=headers, json=body) as response:
-                response.raise_for_status()
-                async for chunk in _iter_sse_json(response):
-                    yield chunk
+        url, body, headers = self._build_request(
+            messages,
+            tools,
+            response_format_json=response_format_json,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            stream=True,
+        )
+        attempt = 0
+        while True:
+            yielded = False
+            try:
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        if response.status_code in _RETRYABLE_STATUS and attempt < self.config.max_retries:
+                            await self._sleep_backoff(attempt, response, reason=f"status {response.status_code}")
+                            attempt += 1
+                            continue
+                        response.raise_for_status()
+                    async for chunk in _iter_sse_json(response):
+                        yielded = True
+                        yield chunk
+                    return
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                # Only retry before any chunk was emitted; retrying mid-stream would duplicate output.
+                if yielded or attempt >= self.config.max_retries:
+                    raise
+                await self._sleep_backoff(attempt, None, reason=exc.__class__.__name__)
+                attempt += 1
+                continue
 
 
 def build_course_agent_input(payload: dict[str, Any], tool_root: str | Path | None = None) -> dict[str, Any]:
@@ -605,6 +831,107 @@ def _message_content(message: dict[str, Any]) -> str:
     return ""
 
 
+def _message_reasoning(message: dict[str, Any]) -> str:
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _fallback_tool_response(events: list[AgentToolEvent], *, response_format_json: bool) -> str:
+    if not events:
+        return ""
+    successes = [event for event in events if event.ok]
+    failures = [event for event in events if not event.ok]
+    if response_format_json:
+        return json.dumps(
+            {
+                "summary": "The model returned an empty final response after using local tools.",
+                "timeline": [],
+                "course_outline": [],
+                "risks": [f"{event.name}: {event.error or 'tool failed'}" for event in failures],
+                "confidence_notes": [
+                    "Fallback response generated from completed tool calls.",
+                    *[f"{event.name}: {_preview_tool_result(event.result, 500)}" for event in successes[:5]],
+                ],
+                "tool_results": [
+                    {
+                        "name": event.name,
+                        "arguments": event.arguments,
+                        "result_preview": _preview_tool_result(event.result, 1000),
+                    }
+                    for event in successes[:8]
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    lines: list[str] = ["I ran the available tools, but the model returned an empty final response."]
+    if successes:
+        lines.append("")
+        lines.append("Tool results:")
+        for event in successes[:8]:
+            lines.append(f"- {event.name}: {_summarize_tool_result(event.result)}")
+        if len(successes) > 8:
+            lines.append(f"- {len(successes) - 8} more successful tool call(s) omitted.")
+    if failures:
+        lines.append("")
+        lines.append("Tool errors:")
+        for event in failures[:5]:
+            lines.append(f"- {event.name}: {event.error or 'tool failed'}")
+        if len(failures) > 5:
+            lines.append(f"- {len(failures) - 5} more failed tool call(s) omitted.")
+    return "\n".join(lines)
+
+
+def _summarize_tool_result(result: Any) -> str:
+    if isinstance(result, list):
+        if not result:
+            return "No results."
+        lines = [f"{len(result)} result(s)."]
+        for item in result[:3]:
+            lines.append(f"  - {_summarize_tool_item(item)}")
+        if len(result) > 3:
+            lines.append(f"  - {len(result) - 3} more result(s).")
+        return "\n".join(lines)
+    return _summarize_tool_item(result)
+
+
+def _summarize_tool_item(item: Any) -> str:
+    if isinstance(item, dict):
+        title = item.get("title") or item.get("name") or item.get("display_name") or item.get("file") or item.get("file_id")
+        labels = []
+        for key in ("course", "source", "status", "exit_code", "due_at", "updated_at"):
+            value = item.get(key)
+            if value not in (None, ""):
+                labels.append(f"{key}={value}")
+        prefix = str(title) if title not in (None, "") else "result"
+        if labels:
+            prefix = f"{prefix} ({', '.join(labels)})"
+        text = item.get("snippet") or item.get("text") or item.get("stdout") or item.get("note") or item.get("message")
+        if text not in (None, ""):
+            return f"{prefix}: {_clean_preview(str(text), 280)}"
+        return _clean_preview(_preview_tool_result(item, 500), 500)
+    return _clean_preview(str(item), 500)
+
+
+def _preview_tool_result(result: Any, limit: int) -> str:
+    try:
+        text = json.dumps(result, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(result)
+    return _clean_preview(text, limit)
+
+
+def _clean_preview(value: str, limit: int) -> str:
+    text = re.sub(r"<[^>]+>", " ", value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "...[truncated]"
+
+
 def _assistant_tool_message(message: dict[str, Any], tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
     assistant: dict[str, Any] = {
         "role": "assistant",
@@ -674,6 +1001,200 @@ def _tool_event_payload(event: AgentToolEvent) -> dict[str, Any]:
         "result": event.result,
         "error": event.error,
     }
+
+
+def _degrade_request(exc: httpx.HTTPStatusError, flags: _RequestFlags) -> _RequestFlags | None:
+    """Choose which optional request feature to drop after a 4xx rejection.
+
+    Returns the updated flags or ``None`` to re-raise. Prefers the feature named in
+    the error body; otherwise drops ``reasoning_effort`` (reasoning-models only),
+    then ``response_format``, then ``tools``, then a non-default ``temperature``
+    (rejected by some reasoning models), since tools are broadly supported and
+    essential to this agent.
+    """
+    if exc.response.status_code not in {400, 404, 422}:
+        return None
+    try:
+        body = exc.response.text.lower()
+    except Exception:
+        body = ""
+    blames_tools = "tool" in body or "function" in body
+    blames_reasoning = "reasoning" in body
+    blames_response_format = "response_format" in body or "json" in body or "schema" in body
+    blames_temperature = "temperature" in body
+    if flags.temperature and blames_temperature:
+        return replace(flags, temperature=False)
+    if flags.response_format and blames_response_format:
+        return replace(flags, response_format=False)
+    if flags.reasoning and blames_reasoning:
+        return replace(flags, reasoning=False)
+    if flags.tools and blames_tools:
+        return replace(flags, tools=False)
+    if flags.reasoning:
+        return replace(flags, reasoning=False)
+    if flags.response_format:
+        return replace(flags, response_format=False)
+    if flags.tools:
+        return replace(flags, tools=False)
+    if flags.temperature:
+        return replace(flags, temperature=False)
+    return None
+
+
+def _raise_if_cancelled(cancel_check: Callable[[], None] | None) -> None:
+    """Invoke a cooperative cancel check; normalize truthy/raising signals to AgentCancelled."""
+    if cancel_check is None:
+        return
+    try:
+        signalled = cancel_check()
+    except AgentCancelled:
+        raise
+    except Exception as exc:  # treat any raised signal (e.g. SyncCancelled) as cancellation
+        raise AgentCancelled(str(exc) or "cancelled") from exc
+    if signalled:
+        raise AgentCancelled("cancelled")
+
+
+def _merge_usage(total: dict[str, int], usage: dict[str, Any] | None) -> None:
+    """Accumulate OpenAI-style token counts across rounds, ignoring non-numeric fields."""
+    if not isinstance(usage, dict):
+        return
+    for key, value in usage.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        total[key] = int(total.get(key, 0) + value)
+
+
+def _completions_url(base_url: str) -> str:
+    """Build a chat-completions URL tolerant of base URLs with/without /v1 or a full path."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return "/v1/chat/completions"
+    low = base.lower()
+    if low.endswith("/chat/completions"):
+        return base
+    if low.endswith("/v1") or low.endswith("/openai/v1") or low.endswith("/v1/openai"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def _compact_messages(messages: list[dict[str, Any]], budget_chars: int) -> list[dict[str, Any]]:
+    """Drop the bodies of older tool results in place when the transcript exceeds the budget.
+
+    Keeps the system prompt, the first user message, and the most recent few messages
+    intact so the model retains task framing plus recent evidence.
+    """
+    if budget_chars <= 0:
+        return messages
+
+    def total() -> int:
+        return sum(len(message.get("content") or "") for message in messages)
+
+    if total() <= budget_chars:
+        return messages
+    protected_tail = 4
+    upper = max(2, len(messages) - protected_tail)
+    for index in range(2, upper):
+        message = messages[index]
+        if message.get("role") == "tool" and message.get("content") != _COMPACTED_TOOL_CONTENT:
+            message["content"] = _COMPACTED_TOOL_CONTENT
+            if total() <= budget_chars:
+                break
+    logger.info("agent compacted context to ~%d chars (budget=%d)", total(), budget_chars)
+    return messages
+
+
+def _validate_tool_arguments(schema: Any, arguments: dict[str, Any]) -> str | None:
+    """Lightweight JSON-schema check: required presence, enum membership, structural types.
+
+    Returns an error string, or None when arguments are acceptable. String/number
+    types are intentionally lenient because tool handlers coerce them defensively.
+    """
+    if not isinstance(schema, dict):
+        return None
+    for key in schema.get("required") or []:
+        if key not in arguments or arguments[key] in (None, ""):
+            return f"missing required field '{key}'"
+    properties = schema.get("properties") or {}
+    if not isinstance(properties, dict):
+        return None
+    for key, spec in properties.items():
+        if not isinstance(spec, dict) or key not in arguments or arguments[key] is None:
+            continue
+        value = arguments[key]
+        enum = spec.get("enum")
+        if enum is not None and value not in enum:
+            return f"field '{key}' must be one of {enum}"
+        message = _structural_type_error(key, value, spec.get("type"))
+        if message:
+            return message
+    return None
+
+
+def _structural_type_error(key: str, value: Any, expected: Any) -> str | None:
+    if expected == "array" and not isinstance(value, list):
+        return f"field '{key}' must be an array"
+    if expected == "object" and not isinstance(value, dict):
+        return f"field '{key}' must be an object"
+    if expected == "boolean" and not isinstance(value, bool):
+        return f"field '{key}' must be a boolean"
+    return None
+
+
+def parse_model_json(raw: str | None) -> Any:
+    """Parse model output as JSON, tolerating markdown code fences and surrounding prose.
+
+    Raises ``json.JSONDecodeError`` when no JSON object/array can be recovered.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = min((pos for pos in (text.find("{"), text.find("[")) if pos >= 0), default=-1)
+    if start < 0:
+        raise json.JSONDecodeError("no JSON value found", text, 0)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : index + 1])
+    raise json.JSONDecodeError("unbalanced JSON value", text, start)
+
+
+def _retry_after_seconds(response: httpx.Response | None) -> float | None:
+    """Parse a numeric ``Retry-After`` header (seconds) when the upstream provides one."""
+    if response is None:
+        return None
+    value = response.headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 async def _iter_sse_json(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
@@ -1098,8 +1619,7 @@ def _normalize_include_patterns(value: Any) -> list[str]:
 
 
 def _iter_workspace_text_files(path: Path, include: list[str]):
-    files = [path] if path.is_file() else [item for item in path.rglob("*") if item.is_file()]
-    for file_path in files:
+    for file_path in _walk_text_files(path):
         if file_path.name.startswith("."):
             continue
         if file_path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".bin", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".zip"}:
@@ -1112,6 +1632,17 @@ def _iter_workspace_text_files(path: Path, include: list[str]):
         except OSError:
             continue
         yield file_path
+
+
+def _walk_text_files(path: Path):
+    if path.is_file():
+        yield path
+        return
+    skip_dirs = {"node_modules", ".venv", "venv", ".git", "dist", "build", "__pycache__", ".pytest_cache", ".cache", ".mypy_cache"}
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if name not in skip_dirs and not name.startswith(".")]
+        for filename in filenames:
+            yield Path(dirpath) / filename
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

@@ -3,12 +3,15 @@ import { api } from './client';
 
 export type AgentStreamToolEvent = {
   name: string;
+  phase: 'start' | 'end';
   ok: boolean;
   error?: string | null;
+  arguments?: Record<string, unknown> | null;
 };
 
 export type AgentStreamHandlers = {
   onDelta?: (content: string) => void;
+  onThinking?: (content: string) => void;
   onTool?: (event: AgentStreamToolEvent) => void;
   onDone?: (message: AgentChatMessage) => void;
   onStatus?: (status: string) => void;
@@ -43,11 +46,13 @@ export async function streamAgentMessage(
   courseId: number | null | undefined,
   sessionId: string | null | undefined,
   sessionTitle: string | null | undefined,
-  handlers: AgentStreamHandlers
+  handlers: AgentStreamHandlers,
+  signal?: AbortSignal
 ): Promise<AgentChatMessage> {
   const response = await fetch('/api/agent/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify({
       message,
       history: history.map((item) => ({ role: item.role, content: item.content })),
@@ -69,8 +74,16 @@ export async function streamAgentMessage(
     if (!event) return;
     if (event.type === 'delta' && typeof event.content === 'string') {
       handlers.onDelta?.(event.content);
+    } else if (event.type === 'thinking' && typeof event.content === 'string') {
+      handlers.onThinking?.(event.content);
     } else if (event.type === 'tool' && typeof event.name === 'string') {
-      handlers.onTool?.({ name: event.name, ok: Boolean(event.ok), error: typeof event.error === 'string' ? event.error : null });
+      handlers.onTool?.({
+        name: event.name,
+        phase: event.phase === 'start' ? 'start' : 'end',
+        ok: Boolean(event.ok),
+        error: typeof event.error === 'string' ? event.error : null,
+        arguments: event.arguments && typeof event.arguments === 'object' ? (event.arguments as Record<string, unknown>) : null
+      });
     } else if (event.type === 'status' && typeof event.status === 'string') {
       handlers.onStatus?.(event.status);
     } else if (event.type === 'error') {

@@ -26,6 +26,15 @@ class AISettingsIn(BaseModel):
     skills: str = ""
 
 
+class AISettingsTestIn(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class AIModelIn(BaseModel):
+    model: str = ""
+
+
 class NotificationSettingsIn(BaseModel):
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None

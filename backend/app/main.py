@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Ensure stdout/stderr can carry non-ASCII (Chinese course data, provider error
+# bodies) regardless of the host locale. On Windows the backend is launched under
+# a piped, non-UTF-8 stream where writing such text raises UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

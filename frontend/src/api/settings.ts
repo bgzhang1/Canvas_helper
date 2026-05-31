@@ -1,4 +1,4 @@
-import type { AppSettings, CanvasTestResult, EventLog } from '../types';
+import type { AIModelList, AIModelTestResult, AppSettings, CanvasTestResult, EventLog } from '../types';
 import { api } from './client';
 
 export type CanvasSettingsResponse = Pick<AppSettings, 'canvas_base_url' | 'token_configured'>;
@@ -38,6 +38,24 @@ export function saveAISettings(ai: AppSettings['ai'], apiKey: string): Promise<A
       reasoning_effort: ai.reasoning_effort,
       skills: ai.skills
     })
+  });
+}
+
+export function testAISettings(baseUrl: string, apiKey: string): Promise<AIModelTestResult> {
+  return api<AIModelTestResult>('/api/settings/ai/test', {
+    method: 'POST',
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey })
+  });
+}
+
+export function fetchAIModels(): Promise<AIModelList> {
+  return api<AIModelList>('/api/settings/ai/models');
+}
+
+export function saveAIModel(model: string): Promise<AppSettings['ai']> {
+  return api<AppSettings['ai']>('/api/settings/ai/model', {
+    method: 'PUT',
+    body: JSON.stringify({ model })
   });
 }
 

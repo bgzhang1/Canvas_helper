@@ -110,7 +110,8 @@ export function eventActionLabel(action: string, t: TFunction) {
     agent_chat_started: 'actionAgentChatStarted',
     agent_chat_completed: 'actionAgentChatCompleted',
     agent_chat_failed: 'actionAgentChatFailed',
-    agent_chat_not_configured: 'actionAgentChatNotConfigured'
+    agent_chat_not_configured: 'actionAgentChatNotConfigured',
+    agent_tool_call: 'actionAgentToolCall'
   };
   return labels[action] ? t(labels[action]) : action;
 }

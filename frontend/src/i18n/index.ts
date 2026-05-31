@@ -26,6 +26,12 @@ const translations = {
     agentReady: 'AGENT READY',
     you: 'YOU',
     agentThinking: 'AGENT THINKING',
+    agentWorking: 'WORKING...',
+    agentFailed: 'FAILED',
+    interruptAgent: 'Interrupt',
+    deleteChat: 'Delete chat',
+    confirmDeleteChat: 'Delete this conversation?',
+    queuedCount: 'QUEUED',
     agentInputPlaceholder: 'Message agent...',
     sendMessage: 'Send message',
     securityEnv: 'CANVAS SECURITY & ENV',
@@ -158,6 +164,7 @@ const translations = {
     pages: 'PAGES',
     testCanvas: 'TEST CANVAS',
     testing: 'TESTING...',
+    testModel: 'TEST MODEL',
     testPassed: 'AVAILABLE',
     testFailed: 'FAILED',
     currentUser: 'CURRENT USER',
@@ -246,7 +253,8 @@ const translations = {
     actionAgentChatStarted: 'Agent chat started',
     actionAgentChatCompleted: 'Agent chat completed',
     actionAgentChatFailed: 'Agent chat failed',
-    actionAgentChatNotConfigured: 'Agent not configured'
+    actionAgentChatNotConfigured: 'Agent not configured',
+    actionAgentToolCall: 'Tool call'
   },
 } as const;
 
@@ -266,6 +274,12 @@ const zhOverrides: Partial<Record<TranslationKey, string>> = {
   agentReady: 'AGENT READY',
   you: '你',
   agentThinking: 'AGENT THINKING',
+  agentWorking: '工作中...',
+  agentFailed: '失败',
+  interruptAgent: '中断',
+  deleteChat: '删除对话',
+  confirmDeleteChat: '删除该会话？',
+  queuedCount: '排队中',
   agentInputPlaceholder: '给 Agent 发送消息...',
   sendMessage: '发送消息',
   sysMenu: '// 系统.菜单',
@@ -409,6 +423,7 @@ const zhOverrides: Partial<Record<TranslationKey, string>> = {
   pages: '页',
   testCanvas: '测试 Canvas',
   testing: '测试中...',
+  testModel: '测试模型',
   testPassed: '可用',
   testFailed: '失败',
   currentUser: '当前用户',
@@ -497,7 +512,8 @@ const zhOverrides: Partial<Record<TranslationKey, string>> = {
   actionAgentChatStarted: 'Agent 对话开始',
   actionAgentChatCompleted: 'Agent 对话完成',
   actionAgentChatFailed: 'Agent 对话失败',
-  actionAgentChatNotConfigured: 'Agent 未配置'
+  actionAgentChatNotConfigured: 'Agent 未配置',
+  actionAgentToolCall: '工具调用'
 };
 
 export function translate(lang: Lang, key: TranslationKey) {

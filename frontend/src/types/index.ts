@@ -187,6 +187,19 @@ export type CanvasTestResult = {
   message: string;
 };
 
+export type AIModelTestResult = {
+  ok: boolean;
+  message: string;
+  model_count: number;
+};
+
+export type AIModelList = {
+  ok: boolean;
+  models: string[];
+  message: string;
+  model: string;
+};
+
 export type EventLog = {
   id: number;
   created_at: string;
@@ -207,6 +220,8 @@ export type AgentChatMessage = {
   content: string;
   tools_used?: string[];
   status?: string;
+  thinking?: string;
+  steps?: { name: string; status: 'running' | 'ok' | 'error'; args?: Record<string, unknown> | null }[];
 };
 
 export type ActiveTab = 'timeline' | 'files' | 'announcements' | 'assignments' | 'people';

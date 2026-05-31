@@ -20,5 +20,6 @@ frontend/dist/
 __pycache__/
 .pytest_cache/
 backend/.mypy_cache/
+test-artifacts/
 
 .DS_Store

@@ -5,6 +5,7 @@ import zipfile
 from io import BytesIO
 
 import fitz
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -238,6 +239,18 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
     assert settings["token_configured"] is False
 
     assert client.post("/api/settings/canvas/test", json={"api_token": ""}).json()["ok"] is False
+
+    async def raise_connect_error(self, *_args, **_kwargs) -> None:
+        request = httpx.Request("GET", "https://canvas.example.edu/api/v1/users/self/profile")
+        raise httpx.ConnectError("Connection refused", request=request)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(app_module.settings_api.CanvasReadOnlyClient, "get_json", raise_connect_error)
+        response = client.post("/api/settings/canvas/test", json={"api_token": "test-token"})
+        assert response.status_code == 200
+        assert response.json()["ok"] is False
+        assert "Canvas connection failed" in response.json()["message"]
+
     assert client.put("/api/settings/canvas", json={"api_token": "test-token"}).json()["token_configured"] is True
     assert client.get("/api/settings/sync").json()["interval_minutes"] == 60
     assert client.put("/api/settings/sync", json={"enabled": False, "interval_minutes": 1}).status_code == 422
@@ -280,6 +293,55 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
     assert any(event["type"] == "delta" for event in events)
     assert events[-1]["type"] == "done"
     assert events[-1]["message"]["status"] == "not_configured"
+
+
+def test_agent_stream_endpoint_accepts_partial_done_from_agent(client: TestClient, monkeypatch) -> None:
+    from backend.app.api import ai as ai_api
+
+    class PartialDoneAgent:
+        async def run_stream(self, **_kwargs):
+            yield {"type": "delta", "content": "Partial answer"}
+            yield {
+                "type": "done",
+                "content": "Partial answer",
+                "tools_used": [],
+                "tool_events": [],
+                "fallback_without_tools": False,
+                "usage": {},
+                "cancelled": False,
+            }
+
+    monkeypatch.setattr(
+        ai_api,
+        "get_ai_settings",
+        lambda include_secrets=False: {
+            "base_url": "https://llm.example/v1",
+            "api_key": "test-key" if include_secrets else "",
+            "model": "test-model",
+            "reasoning_effort": "medium",
+            "skills": "",
+        },
+    )
+    monkeypatch.setattr(ai_api, "build_agent", lambda _settings: PartialDoneAgent())
+    monkeypatch.setattr(ai_api, "build_agent_tools", lambda: [])
+
+    with client.stream(
+        "POST",
+        "/api/agent/chat/stream",
+        json={"message": "stream partial", "history": [], "session_id": "partial-session"},
+    ) as response:
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert events[0]["type"] == "status"
+    assert {"type": "delta", "content": "Partial answer"} in events
+    assert events[-1]["type"] == "done"
+    assert events[-1]["message"]["content"] == "Partial answer"
+    assert events[-1]["message"]["status"] == "ok"
+
+    ai_events = client.get("/api/events?limit=3&category=ai").json()
+    assert ai_events[0]["action"] == "agent_chat_completed"
+    assert ai_events[0]["metadata"]["response_preview"] == "Partial answer"
 
 
 def test_background_sync_and_analysis_routes_complete_without_external_services(client: TestClient) -> None:

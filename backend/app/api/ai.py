@@ -1,96 +1,39 @@
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..ai import AgentConfig, OpenAICompatAgent, SkillRegistry, build_shell_agent_tools
-from ..db import rows_to_dicts
-from ..notification_service import build_notification_agent_tools
+from ..ai.chat import AGENT_SYSTEM_PROMPT, build_agent, build_agent_chat_context, build_agent_tools
 from ..runtime import (
     course_label_or_404,
     get_ai_settings,
     initial_analysis_progress,
     make_ai_service,
-    make_notification_service,
-    project_root,
     state,
 )
 from ..schemas import AgentChatIn
 
 router = APIRouter()
 
-AGENT_SYSTEM_PROMPT = (
-    "You are the Canvas_helper agent. Answer the user's request directly. "
-    "Use local tools when useful. Filesystem writes are allowed only inside the project sandbox; "
-    "outside paths are read-only. Use notification tools only for explicit notification or reminder requests. "
-    "Never request Canvas credentials or raw Canvas API access."
-)
 
-
-def _agent_chat_context(course_id: int | None = None) -> dict[str, Any]:
-    with state().db.connect() as conn:
-        courses = rows_to_dicts(
-            conn.execute(
-                """
-                SELECT c.id, c.name, c.course_code, c.term_name,
-                       (SELECT COUNT(*) FROM assignments a WHERE a.course_id = c.id) AS assignment_count,
-                       (SELECT COUNT(*) FROM files f WHERE f.course_id = c.id) AS file_count
-                FROM courses c
-                ORDER BY c.term_name DESC, c.name
-                LIMIT 50
-                """
-            ).fetchall()
-        )
-        selected: dict[str, Any] | None = None
-        if course_id is not None:
-            row = conn.execute(
-                """
-                SELECT id, name, course_code, term_name
-                FROM courses
-                WHERE id = ?
-                """,
-                (course_id,),
-            ).fetchone()
-            if row:
-                assignments = rows_to_dicts(
-                    conn.execute(
-                        """
-                        SELECT name, due_at, unlock_at, lock_at, points_possible
-                        FROM assignments
-                        WHERE course_id = ?
-                        ORDER BY COALESCE(due_at, unlock_at, lock_at), name
-                        LIMIT 30
-                        """,
-                        (course_id,),
-                    ).fetchall()
-                )
-                selected = {
-                    "course": dict(row),
-                    "assignments": assignments,
-                    "analysis": state().db.get_analysis(course_id),
-                }
-    return {"courses": courses, "selected_course": selected}
-
-
-def _build_agent(ai_settings: dict[str, Any]) -> OpenAICompatAgent:
-    return OpenAICompatAgent(
-        AgentConfig(
-            base_url=ai_settings["base_url"],
-            api_key=ai_settings["api_key"],
-            model=ai_settings["model"],
-            reasoning_effort=ai_settings["reasoning_effort"],
-            max_tool_rounds=6,
-        ),
-        skills=SkillRegistry.from_text(ai_settings["skills"]),
-    )
-
-
-def _build_agent_tools():
-    shell_tools = build_shell_agent_tools(project_root()) if state().settings.agent_shell_tools_enabled else []
-    return shell_tools + build_notification_agent_tools(make_notification_service())
+def _describe_error(exc: Exception) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {"error_type": exc.__class__.__name__, "traceback": traceback.format_exc()[-2000:]}
+    if isinstance(exc, httpx.HTTPStatusError):
+        meta["status_code"] = exc.response.status_code
+        meta["request_url"] = str(exc.request.url)
+        try:
+            meta["response_body"] = exc.response.text[:1000]
+        except Exception:
+            meta["response_body"] = None
+        return f"HTTP {exc.response.status_code} from {exc.request.url}: {meta.get('response_body') or exc}", meta
+    if isinstance(exc, httpx.TimeoutException):
+        meta["status_code"] = "timeout"
+    return f"{exc.__class__.__name__}: {exc}", meta
 
 
 @router.get("/api/analysis/status")
@@ -143,14 +86,14 @@ async def agent_chat(payload: AgentChatIn) -> dict[str, Any]:
             "status": "not_configured",
         }
 
-    context = _agent_chat_context(payload.course_id)
+    context = build_agent_chat_context(payload.course_id)
     history = [
         {"role": item.role, "content": item.content[:6000]}
         for item in payload.history[-12:]
         if item.role in {"user", "assistant"} and item.content.strip()
     ]
-    agent = _build_agent(ai_settings)
-    tools = _build_agent_tools()
+    agent = build_agent(ai_settings)
+    tools = build_agent_tools()
     try:
         run = await agent.run(
             system_prompt=AGENT_SYSTEM_PROMPT,
@@ -163,6 +106,7 @@ async def agent_chat(payload: AgentChatIn) -> dict[str, Any]:
             response_format_json=False,
         )
     except Exception as exc:
+        error_message, error_meta = _describe_error(exc)
         state().db.add_event(
             category="ai",
             action="agent_chat_failed",
@@ -171,8 +115,8 @@ async def agent_chat(payload: AgentChatIn) -> dict[str, Any]:
             course_id=payload.course_id,
             item_id=session_id,
             item_name=session_title,
-            message=f"{exc.__class__.__name__}: {exc}",
-            metadata=event_metadata,
+            message=error_message,
+            metadata={**event_metadata, **error_meta},
         )
         raise
     content = run.content.strip() or "(empty response)"
@@ -257,14 +201,14 @@ async def _agent_chat_stream_events(payload: AgentChatIn, message: str):
         )
         return
 
-    context = _agent_chat_context(payload.course_id)
+    context = build_agent_chat_context(payload.course_id)
     history = [
         {"role": item.role, "content": item.content[:6000]}
         for item in payload.history[-12:]
         if item.role in {"user", "assistant"} and item.content.strip()
     ]
-    agent = _build_agent(ai_settings)
-    tools = _build_agent_tools()
+    agent = build_agent(ai_settings)
+    tools = build_agent_tools()
     content_parts: list[str] = []
     latest_done: dict[str, Any] = {}
     try:
@@ -282,10 +226,29 @@ async def _agent_chat_stream_events(payload: AgentChatIn, message: str):
                 content_parts.append(str(event.get("content") or ""))
                 yield event_line(event)
             elif event.get("type") == "tool":
+                if event.get("phase") != "start":
+                    state().db.add_event(
+                        category="ai",
+                        action="agent_tool_call",
+                        status="success" if event.get("ok") else "failed",
+                        title=f"Tool {event.get('name')}",
+                        course_id=payload.course_id,
+                        item_id=session_id,
+                        item_name=str(event.get("name") or ""),
+                        message=event.get("error"),
+                        metadata={
+                            "session_id": session_id,
+                            "tool": event.get("name"),
+                            "arguments": event.get("arguments"),
+                            "ok": event.get("ok"),
+                            "error": event.get("error"),
+                        },
+                    )
                 yield event_line(event)
             elif event.get("type") == "done":
                 latest_done = event
     except Exception as exc:
+        error_message, error_meta = _describe_error(exc)
         state().db.add_event(
             category="ai",
             action="agent_chat_failed",
@@ -294,10 +257,10 @@ async def _agent_chat_stream_events(payload: AgentChatIn, message: str):
             course_id=payload.course_id,
             item_id=session_id,
             item_name=session_title,
-            message=f"{exc.__class__.__name__}: {exc}",
-            metadata=event_metadata,
+            message=error_message,
+            metadata={**event_metadata, **error_meta},
         )
-        yield event_line({"type": "error", "message": f"{exc.__class__.__name__}: {exc}"})
+        yield event_line({"type": "error", "message": error_message, **error_meta})
         return
 
     content = "".join(content_parts).strip() or str(latest_done.get("content") or "").strip() or "(empty response)"

@@ -163,6 +163,208 @@ async def test_agent_falls_back_when_provider_rejects_tools() -> None:
     assert "tools" not in requests[1]
 
 
+@pytest.mark.asyncio
+async def test_agent_drops_reasoning_but_keeps_tools_when_rejected() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(400, json={"error": {"message": "Unsupported parameter: 'reasoning_effort'"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"summary": "ok", "timeline": [], "course_outline": [], "risks": [], "confidence_notes": []}),
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model", reasoning_effort="medium"),
+            client=client,
+        )
+        result = await agent.run(
+            system_prompt="Return JSON.",
+            user_payload=build_course_agent_input(course_payload()),
+            tools=build_course_agent_tools(course_payload()),
+            response_format_json=True,
+        )
+
+    assert result.fallback_without_tools is False
+    assert "reasoning_effort" in requests[0]
+    assert "reasoning_effort" not in requests[1]
+    assert "tools" in requests[1]
+
+
+@pytest.mark.asyncio
+async def test_agent_falls_back_to_tool_results_when_final_response_is_empty() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "search_course_materials",
+                                            "arguments": json.dumps({"query": "deadline", "limit": 3}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        result = await agent.run(
+            system_prompt="Answer.",
+            user_payload=build_course_agent_input(course_payload()),
+            tools=build_course_agent_tools(course_payload()),
+        )
+
+    assert result.tools_used == ["search_course_materials"]
+    assert "(empty response)" not in result.content
+    assert "Tool results:" in result.content
+    assert "Deadline reminder" in result.content
+
+
+@pytest.mark.asyncio
+async def test_json_agent_fallback_remains_valid_json_when_final_response_is_empty() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "search_course_materials",
+                                            "arguments": json.dumps({"query": "deadline", "limit": 3}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        result = await agent.run(
+            system_prompt="Return JSON.",
+            user_payload=build_course_agent_input(course_payload()),
+            tools=build_course_agent_tools(course_payload()),
+            response_format_json=True,
+        )
+
+    parsed = json.loads(result.content)
+    assert parsed["summary"].startswith("The model returned an empty final response")
+    assert parsed["tool_results"][0]["name"] == "search_course_materials"
+    assert "Deadline reminder" in parsed["tool_results"][0]["result_preview"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_agent_falls_back_to_tool_results_when_final_response_is_empty() -> None:
+    requests: list[dict] = []
+
+    def sse(*payloads: dict) -> str:
+        lines = [f"data: {json.dumps(payload)}\n" for payload in payloads]
+        lines.append("data: [DONE]\n")
+        return "\n".join(lines)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                text=sse(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "search_course_materials",
+                                                "arguments": json.dumps({"query": "deadline", "limit": 3}),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+            )
+        return httpx.Response(200, text=sse({"choices": [{"delta": {"content": ""}}]}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        events = [
+            event
+            async for event in agent.run_stream(
+                system_prompt="Answer.",
+                user_payload=build_course_agent_input(course_payload()),
+                tools=build_course_agent_tools(course_payload()),
+            )
+        ]
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["tools_used"] == ["search_course_materials"]
+    assert "Tool results:" in done["content"]
+    assert "Deadline reminder" in done["content"]
+
+
 def test_grep_tool_searches_project_sandbox(tmp_path) -> None:
     (tmp_path / "files").mkdir()
     (tmp_path / "files" / "slides.txt").write_text("Intro\nDeadline: next week\n", encoding="utf-8")
@@ -264,3 +466,85 @@ async def test_agent_drops_reasoning_effort_when_provider_rejects_it() -> None:
     assert result.content == "ok"
     assert requests[0]["reasoning_effort"] == "high"
     assert "reasoning_effort" not in requests[1]
+
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_transient_5xx_then_succeeds() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": {"message": "service unavailable"}})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(
+                base_url="https://llm.example/v1",
+                api_key="test",
+                model="model",
+                max_retries=2,
+                retry_base_delay=0.0,
+                retry_max_delay=0.0,
+            ),
+            client=client,
+        )
+        result = await agent.run(system_prompt="Answer.", user_payload={"message": "hi"}, tools=None)
+
+    assert result.content == "ok"
+    assert len(requests) == 2  # one transient failure + one success
+
+
+@pytest.mark.asyncio
+async def test_agent_runs_multiple_tool_calls_in_one_round_preserving_order() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_a",
+                                        "type": "function",
+                                        "function": {"name": "list_course_materials", "arguments": json.dumps({"section": "assignments"})},
+                                    },
+                                    {
+                                        "id": "call_b",
+                                        "type": "function",
+                                        "function": {"name": "search_course_materials", "arguments": json.dumps({"query": "deadline"})},
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "done"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        result = await agent.run(
+            system_prompt="Answer.",
+            user_payload=build_course_agent_input(course_payload()),
+            tools=build_course_agent_tools(course_payload()),
+        )
+
+    assert result.content == "done"
+    assert result.tools_used == ["list_course_materials", "search_course_materials"]
+    # Tool result messages are appended in assistant call order, matching tool_call_id order.
+    tool_messages = [m for m in requests[1]["messages"] if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_messages] == ["call_a", "call_b"]

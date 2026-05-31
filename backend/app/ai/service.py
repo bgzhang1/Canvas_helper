@@ -14,6 +14,7 @@ from .agent import (
     SkillRegistry,
     build_course_agent_input,
     build_course_agent_tools,
+    parse_model_json,
 )
 from ..db import Database, rows_to_dicts, utc_now
 
@@ -297,7 +298,7 @@ class AIAnalysisService:
         )
         raw = run.content
         try:
-            parsed = json.loads(raw)
+            parsed = parse_model_json(raw)
             if not isinstance(parsed, dict):
                 return {
                     "summary": raw,

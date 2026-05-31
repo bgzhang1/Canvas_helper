@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bell, Cpu, Database, FileText, Network, RefreshCcw, ShieldCheck } from 'lucide-react';
-import type { AppSettings, CanvasTestResult, EventLog, EventLogFilter, SyncStatus } from '../types';
+import type { AIModelTestResult, AppSettings, CanvasTestResult, EventLog, EventLogFilter, SyncStatus } from '../types';
 import { useAppContext } from '../context/AppContext';
 import {
   fetchEventLogs,
@@ -8,6 +8,7 @@ import {
   saveCanvasSettings as persistCanvasSettings,
   saveNotificationSettings as persistNotificationSettings,
   saveSyncSettings as persistSyncSettings,
+  testAISettings as requestAISettingsTest,
   testCanvasSettings as requestCanvasSettingsTest
 } from '../api/settings';
 import { EmptyState } from '../components/ui';
@@ -39,6 +40,8 @@ export function SettingsView({
   const [telegramBotToken, setTelegramBotToken] = useState('');
   const [isTestingCanvas, setIsTestingCanvas] = useState(false);
   const [canvasTest, setCanvasTest] = useState<CanvasTestResult | null>(null);
+  const [isTestingAI, setIsTestingAI] = useState(false);
+  const [aiTest, setAiTest] = useState<AIModelTestResult | null>(null);
   const [eventLogs, setEventLogs] = useState<EventLog[]>([]);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
   const [eventLogFilter, setEventLogFilter] = useState<EventLogFilter>('all');
@@ -151,6 +154,20 @@ export function SettingsView({
     }
   }
 
+  async function testAISettings() {
+    if (!settings) return;
+    setIsTestingAI(true);
+    setAiTest(null);
+    setError(null);
+    try {
+      setAiTest(await requestAISettingsTest(settings.ai.base_url, aiApiKey));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsTestingAI(false);
+    }
+  }
+
   async function saveNotificationSettings() {
     if (!settings) return;
     setSaving('notifications');
@@ -237,20 +254,17 @@ export function SettingsView({
                   />
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <TextField label={t('modelSelect')} value={settings.ai.model} onChange={(value) => updateAI({ model: value })} placeholder={t('modelPlaceholder')} />
-                  <div className="flex flex-col gap-2">
-                    <label className="text-[10px] font-mono tracking-widest uppercase">{t('reasoningEffort')}</label>
-                    <select
-                      value={settings.ai.reasoning_effort}
-                      onChange={(event) => updateAI({ reasoning_effort: event.target.value })}
-                      className="border border-black bg-white focus:bg-[#E8E8E3] text-sm font-mono rounded-none focus:ring-0 outline-none p-2 uppercase"
-                    >
-                      <option value="low">{t('low')}</option>
-                      <option value="medium">{t('medium')}</option>
-                      <option value="high">{t('high')}</option>
-                    </select>
-                  </div>
+                <div className="flex flex-col gap-2">
+                  <label className="text-[10px] font-mono tracking-widest uppercase">{t('reasoningEffort')}</label>
+                  <select
+                    value={settings.ai.reasoning_effort}
+                    onChange={(event) => updateAI({ reasoning_effort: event.target.value })}
+                    className="border border-black bg-white focus:bg-[#E8E8E3] text-sm font-mono rounded-none focus:ring-0 outline-none p-2 uppercase"
+                  >
+                    <option value="low">{t('low')}</option>
+                    <option value="medium">{t('medium')}</option>
+                    <option value="high">{t('high')}</option>
+                  </select>
                 </div>
 
                 <div className="flex flex-col gap-2">
@@ -264,7 +278,23 @@ export function SettingsView({
                   />
                 </div>
 
-                <SaveConfigButton saving={saving === 'ai'} label={t('saveConfig')} onClick={saveAISettings} />
+                <div className="settings-actions flex flex-col sm:flex-row gap-3">
+                  <SaveConfigButton saving={saving === 'ai'} label={t('saveConfig')} onClick={saveAISettings} />
+                  <button
+                    onClick={testAISettings}
+                    disabled={isTestingAI}
+                    className="flex min-w-0 max-w-full items-center justify-center gap-2 px-4 py-2 text-xs font-mono font-bold tracking-widest uppercase border border-black bg-[#F4F4F0] text-black hover:bg-black hover:text-[#F4F4F0] disabled:bg-[#E8E8E3] disabled:text-gray-500 disabled:cursor-wait"
+                  >
+                    <Cpu size={14} className={isTestingAI ? 'animate-pulse' : ''} />
+                    {isTestingAI ? t('testing') : t('testModel')}
+                  </button>
+                </div>
+                {aiTest && (
+                  <div className={`border border-black px-4 py-3 text-xs font-mono ${aiTest.ok ? 'bg-black text-[#F4F4F0]' : 'bg-white text-black'}`}>
+                    <div className="font-bold tracking-widest uppercase">{aiTest.ok ? t('testPassed') : t('testFailed')}</div>
+                    <div className="mt-1 break-words">{aiTest.message}</div>
+                  </div>
+                )}
               </div>
             )}
           </section>
