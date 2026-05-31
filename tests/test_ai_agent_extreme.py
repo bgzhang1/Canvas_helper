@@ -12,7 +12,7 @@ import json
 import httpx
 import pytest
 
-from backend.app.ai import (
+from agent import (
     AgentCancelled,
     AgentConfig,
     AgentToolEvent,
@@ -21,7 +21,7 @@ from backend.app.ai import (
     OpenAICompatAgent,
     parse_model_json,
 )
-from backend.app.ai.agent import _completions_url, _compact_messages, _validate_tool_arguments
+from agent.agent import _completions_url, _compact_messages, _validate_tool_arguments
 from backend.app.db import Database, utc_now
 
 
@@ -55,7 +55,7 @@ def _agent(handler, **config) -> tuple[OpenAICompatAgent, httpx.AsyncClient]:
 
 
 def _course_tool():
-    from backend.app.ai.agent import AgentTool
+    from agent.agent import AgentTool
 
     return AgentTool(
         name="lookup",

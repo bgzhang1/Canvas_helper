@@ -55,6 +55,8 @@ def test_init_creates_schema_and_sets_user_version(tmp_path) -> None:
         "analyses",
         "sync_runs",
         "event_logs",
+        "course_material_docs",
+        "course_material_docs_fts",
     }.issubset(table_names(db_path))
     assert {
         "idx_courses_term_name_name",
@@ -65,6 +67,8 @@ def test_init_creates_schema_and_sets_user_version(tmp_path) -> None:
         "idx_course_people_course_role_name",
         "idx_files_course_updated",
         "idx_files_course_backup_status",
+        "idx_course_material_docs_course_source",
+        "idx_course_material_docs_source_id",
     }.issubset(index_names(db_path))
     assert db.get_setting("sync.enabled") == "false"
     assert db.get_setting("sync.interval_minutes") == "60"

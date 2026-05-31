@@ -16,7 +16,7 @@ from .agent import (
     build_course_agent_tools,
     parse_model_json,
 )
-from ..db import Database, rows_to_dicts, utc_now
+from backend.app.db import Database, rows_to_dicts, utc_now
 
 
 @dataclass(frozen=True)
@@ -280,7 +280,7 @@ class AIAnalysisService:
             "Do not request Canvas, browser, MCP, or network access."
         )
         tool_root = payload.get("agent_project_root") or payload.get("agent_workspace_path")
-        tools = build_course_agent_tools(payload, tool_root) + self.agent_tools
+        tools = build_course_agent_tools(payload, tool_root, search_handler=lambda args: self._search_course_materials(payload, args)) + self.agent_tools
         agent = OpenAICompatAgent(
             AgentConfig(
                 base_url=self.config.base_url or "",
@@ -320,6 +320,76 @@ class AIAnalysisService:
                 "risks": ["Model returned non-JSON content."],
                 "confidence_notes": ["Fallback parsing was used."],
             }
+
+    def _search_course_materials(self, payload: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return []
+        limit = max(1, min(int(args.get("limit") or 8) if str(args.get("limit") or "8").isdigit() else 8, 20))
+        course = payload.get("course") or {}
+        course_filter = str(course.get("course_code") or course.get("name") or "")
+        results = self.db.search_course_materials(query, course=course_filter, limit=max(limit * 3, 20))
+        if results is None:
+            return self._search_course_payload_materials(payload, args)
+
+        source_map = {
+            "announcement": "announcements",
+            "assignment": "assignments",
+            "page": "pages",
+            "file": "files",
+        }
+        source_filters = set(args.get("sources") or [])
+        if source_filters:
+            results = [item for item in results if source_map.get(str(item.get("source") or ""), item.get("source")) in source_filters]
+        return [
+            {
+                "source": source_map.get(str(item.get("source") or ""), item.get("source")),
+                "title": item.get("title"),
+                "snippet": item.get("snippet"),
+                "metadata": {"course": item.get("course")},
+            }
+            for item in results[:limit]
+        ]
+
+    def _search_course_payload_materials(self, payload: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+        query = str(args.get("query") or "").strip().lower()
+        if not query:
+            return []
+        sources = set(args.get("sources") or ["announcements", "assignments", "pages", "files"])
+        limit = max(1, min(int(args.get("limit") or 8) if str(args.get("limit") or "8").isdigit() else 8, 20))
+        matches: list[dict[str, Any]] = []
+
+        def add(source: str, title: str, body: str, metadata: dict[str, Any] | None = None) -> None:
+            if source not in sources or query not in f"{title}\n{body}".lower():
+                return
+            matches.append(
+                {
+                    "source": source,
+                    "title": title,
+                    "snippet": self._snippet(body or title, query, 700),
+                    "metadata": metadata or {},
+                }
+            )
+
+        for item in payload.get("assignments") or []:
+            add("assignments", str(item.get("name") or ""), json.dumps(item, ensure_ascii=False), {"due_at": item.get("due_at")})
+        for item in payload.get("announcements") or []:
+            add("announcements", str(item.get("title") or ""), str(item.get("message") or ""), {"posted_at": item.get("posted_at")})
+        for item in payload.get("pages") or []:
+            add("pages", str(item.get("title") or ""), str(item.get("body") or ""), {"updated_at": item.get("updated_at")})
+        for item in payload.get("files") or []:
+            outline = json.dumps(item.get("outline") or [], ensure_ascii=False)
+            body = "\n".join([outline, str(item.get("text_excerpt") or "")])
+            add("files", str(item.get("display_name") or ""), body, {"updated_at": item.get("updated_at")})
+        return matches[:limit]
+
+    def _snippet(self, text: str, query: str, limit: int) -> str:
+        lowered = text.lower()
+        idx = lowered.find(query)
+        if idx < 0:
+            idx = 0
+        start = max(0, idx - 200)
+        return text[start : start + limit].strip()
 
     def _fallback_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {

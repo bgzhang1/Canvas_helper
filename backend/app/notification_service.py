@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .ai import AgentTool
+from agent import AgentTool
 from .db import Database, utc_now
 
 

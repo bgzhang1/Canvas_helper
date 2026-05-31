@@ -44,6 +44,7 @@ class AgentConfig:
     timeout_seconds: float = 120.0
     tool_timeout_seconds: float = 30.0
     max_retries: int = 2
+    max_empty_retries: int = 1
     retry_base_delay: float = 0.5
     retry_max_delay: float = 8.0
     max_context_chars: int = 400_000
@@ -244,7 +245,13 @@ class OpenAICompatAgent:
                     if not tool_calls:
                         content = _message_content(message)
                         if not content.strip():
-                            content = _fallback_tool_response(events, response_format_json=response_format_json)
+                            recovered, recovered_usage = await self._recover_empty_final(
+                                client, messages, flags,
+                                response_format_json=response_format_json,
+                                temperature=temperature,
+                            )
+                            _merge_usage(usage, recovered_usage)
+                            content = recovered or _fallback_tool_response(events, response_format_json=response_format_json)
                         return AgentRunResult(content, events, fallback_without_tools, usage)
 
                     round_index += 1
@@ -278,6 +285,16 @@ class OpenAICompatAgent:
                     reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
                 )
                 _merge_usage(usage, round_usage)
+                content = _message_content(message)
+                if not content.strip():
+                    recovered, recovered_usage = await self._recover_empty_final(
+                        client, messages, flags,
+                        response_format_json=response_format_json,
+                        temperature=temperature,
+                    )
+                    _merge_usage(usage, recovered_usage)
+                    if recovered.strip():
+                        content = recovered
         except AgentCancelled:
             logger.info("agent run cancelled by caller")
             return AgentRunResult(
@@ -287,7 +304,6 @@ class OpenAICompatAgent:
                 usage,
                 cancelled=True,
             )
-        content = _message_content(message)
         return AgentRunResult(
             content if content.strip() else _fallback_tool_response(events, response_format_json=response_format_json),
             events,
@@ -395,6 +411,19 @@ class OpenAICompatAgent:
                         if stream_interrupted and not content.strip():
                             yield done_event("The model stream was interrupted before a complete answer was received.")
                             return
+                        if not content.strip():
+                            recovered: list[str] = []
+                            async for event in self._recover_empty_final_stream(
+                                client, messages, flags,
+                                response_format_json=response_format_json,
+                                temperature=temperature,
+                                usage=usage,
+                                out=recovered,
+                            ):
+                                yield event
+                            if recovered:
+                                yield done_event(recovered[0])
+                                return
                         yield done_event(content)
                         return
 
@@ -457,6 +486,19 @@ class OpenAICompatAgent:
                         yield done_event("".join(content_parts))
                         return
                     raise
+                if not "".join(content_parts).strip():
+                    recovered_tail: list[str] = []
+                    async for event in self._recover_empty_final_stream(
+                        client, messages, flags,
+                        response_format_json=response_format_json,
+                        temperature=temperature,
+                        usage=usage,
+                        out=recovered_tail,
+                    ):
+                        yield event
+                    if recovered_tail:
+                        yield done_event(recovered_tail[0])
+                        return
         except AgentCancelled:
             logger.info("agent stream cancelled by caller")
             yield done_event("".join(content_parts), cancelled=True)
@@ -604,6 +646,84 @@ class OpenAICompatAgent:
                 raise httpx.HTTPError("Provider returned no choices in chat completion response")
             return choices[0].get("message") or {}, data.get("usage") or {}
 
+    async def _recover_empty_final(
+        self,
+        client: httpx.AsyncClient,
+        messages: list[dict[str, Any]],
+        flags: _RequestFlags,
+        *,
+        response_format_json: bool,
+        temperature: float | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Re-prompt (without tools) to recover a final answer when the model returns empty content."""
+        usage: dict[str, int] = {}
+        nudged = list(messages)
+        for _ in range(max(0, self.config.max_empty_retries)):
+            nudged.append(
+                {
+                    "role": "system",
+                    "content": "Your previous reply had no content. Write the complete final answer now using the tool results above; do not call any tools.",
+                }
+            )
+            logger.warning("agent recovering empty final response with a re-prompt")
+            message, round_usage = await self._chat_completion(
+                client,
+                self._prepare_context(nudged),
+                None,
+                response_format_json=response_format_json and flags.response_format,
+                temperature=temperature if flags.temperature else None,
+                reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+            )
+            _merge_usage(usage, round_usage)
+            content = _message_content(message)
+            if content.strip():
+                return content, usage
+        return "", usage
+
+    async def _recover_empty_final_stream(
+        self,
+        client: httpx.AsyncClient,
+        messages: list[dict[str, Any]],
+        flags: _RequestFlags,
+        *,
+        response_format_json: bool,
+        temperature: float | None,
+        usage: dict[str, int],
+        out: list[str],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a no-tool re-prompt to recover a final answer; append recovered text to ``out``."""
+        nudged = list(messages)
+        for _ in range(max(0, self.config.max_empty_retries)):
+            nudged.append(
+                {
+                    "role": "system",
+                    "content": "Your previous reply had no content. Write the complete final answer now using the tool results above; do not call any tools.",
+                }
+            )
+            logger.warning("agent recovering empty final response with a streamed re-prompt")
+            parts: list[str] = []
+            async for chunk in self._chat_completion_stream(
+                client,
+                self._prepare_context(nudged),
+                None,
+                response_format_json=response_format_json and flags.response_format,
+                temperature=temperature if flags.temperature else None,
+                reasoning_effort=self.config.reasoning_effort if flags.reasoning else None,
+            ):
+                if isinstance(chunk, dict) and chunk.get("usage"):
+                    _merge_usage(usage, chunk["usage"])
+                delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}) if isinstance(chunk, dict) else {}
+                reasoning_delta = _message_reasoning(delta)
+                if reasoning_delta:
+                    yield {"type": "thinking", "content": reasoning_delta}
+                content_delta = _message_content(delta)
+                if content_delta:
+                    parts.append(content_delta)
+                    yield {"type": "delta", "content": content_delta}
+            if "".join(parts).strip():
+                out.append("".join(parts))
+                return
+
     async def _chat_completion_stream(
         self,
         client: httpx.AsyncClient,
@@ -698,7 +818,11 @@ def build_course_agent_input(payload: dict[str, Any], tool_root: str | Path | No
     return data
 
 
-def build_course_agent_tools(payload: dict[str, Any], tool_root: str | Path | None = None) -> list[AgentTool]:
+def build_course_agent_tools(
+    payload: dict[str, Any],
+    tool_root: str | Path | None = None,
+    search_handler: ToolHandler | None = None,
+) -> list[AgentTool]:
     tools = [
         AgentTool(
             name="list_course_materials",
@@ -731,7 +855,7 @@ def build_course_agent_tools(payload: dict[str, Any], tool_root: str | Path | No
                 },
                 "required": ["query"],
             },
-            handler=lambda args: _search_course_materials(payload, args),
+            handler=lambda args: search_handler(args) if search_handler else _search_course_materials(payload, args),
         ),
         AgentTool(
             name="get_file_excerpt",

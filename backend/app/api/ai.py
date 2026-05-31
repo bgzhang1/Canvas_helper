@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..ai.chat import AGENT_SYSTEM_PROMPT, build_agent, build_agent_chat_context, build_agent_tools
+from agent.chat import AGENT_SYSTEM_PROMPT, build_agent, build_agent_chat_context, build_agent_tools
 from ..runtime import (
     course_label_or_404,
     get_ai_settings,

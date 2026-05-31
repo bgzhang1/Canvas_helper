@@ -11,10 +11,12 @@ class SyncSettingsIn(BaseModel):
 
 
 class CanvasSettingsIn(BaseModel):
+    base_url: str | None = None
     api_token: str | None = None
 
 
 class CanvasSettingsTestIn(BaseModel):
+    base_url: str | None = None
     api_token: str | None = None
 
 

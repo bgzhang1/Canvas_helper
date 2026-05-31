@@ -235,7 +235,8 @@ export function AgentChatView({
         const messages = [...session.messages];
         const last = messages[messages.length - 1];
         if (last?.role === 'assistant' && last.status === 'streaming') {
-          messages[messages.length - 1] = { ...last, status: 'ok', steps: undefined, thinking: undefined };
+          const steps = last.steps?.map((step) => (step.status === 'running' ? { ...step, status: 'ok' as const } : step));
+          messages[messages.length - 1] = { ...last, status: 'ok', steps };
         }
         return { ...session, messages, updatedAt: new Date().toISOString() };
       })
@@ -288,8 +289,9 @@ export function AgentChatView({
         if (tool.phase === 'start') {
           steps.push({ name: tool.name, status: 'running', args: tool.arguments ?? null });
         } else {
-          const idx = steps.map((step) => step.name).lastIndexOf(tool.name);
           const status = tool.ok ? 'ok' : 'error';
+          let idx = steps.findIndex((step) => step.name === tool.name && step.status === 'running');
+          if (idx < 0) idx = steps.map((step) => step.name).lastIndexOf(tool.name);
           if (idx >= 0) steps[idx] = { name: tool.name, status, args: tool.arguments ?? steps[idx].args ?? null };
           else steps.push({ name: tool.name, status, args: tool.arguments ?? null });
         }
@@ -307,7 +309,8 @@ export function AgentChatView({
         const messages = [...session.messages];
         const last = messages[messages.length - 1];
         if (last?.role === 'assistant') {
-          messages[messages.length - 1] = reply;
+          const steps = (reply.steps ?? last.steps)?.map((step) => (step.status === 'running' ? { ...step, status: 'ok' as const } : step));
+          messages[messages.length - 1] = { ...reply, thinking: reply.thinking ?? last.thinking, steps };
         } else {
           messages.push(reply);
         }
@@ -410,35 +413,37 @@ export function AgentChatView({
                           <span className="text-red-700">{t('agentFailed')}</span>
                         )}
                       </div>
-                      {message.thinking && (
+                      {(message.thinking || (message.steps && message.steps.length > 0)) && (
                         <details className="mb-2 border border-dashed border-gray-400 bg-white/50 p-2" open={message.status === 'streaming'}>
                           <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-gray-500">{t('agentThinking')}</summary>
-                          <div className="mt-2 whitespace-pre-wrap text-[11px] font-mono text-gray-600">{message.thinking}</div>
+                          {message.thinking && (
+                            <div className="mt-2 whitespace-pre-wrap text-[11px] font-mono text-gray-600">{message.thinking}</div>
+                          )}
+                          {message.steps && message.steps.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                              {message.steps.map((step, stepIndex) => {
+                                const icon = step.status === 'running' ? '⏳' : step.status === 'ok' ? '✓' : '✗';
+                                const detail = step.args && Object.keys(step.args).length > 0 ? JSON.stringify(step.args, null, 2) : null;
+                                const label = (
+                                  <>
+                                    <span>{icon}</span>
+                                    <span className={step.status === 'running' ? 'animate-pulse' : ''}>{step.name}</span>
+                                  </>
+                                );
+                                return detail ? (
+                                  <details key={`${step.name}-${stepIndex}`} className="text-[10px] font-mono uppercase tracking-widest text-gray-600">
+                                    <summary className="flex cursor-pointer items-center gap-2">{label}</summary>
+                                    <pre className="ml-5 mt-1 whitespace-pre-wrap break-all border border-dashed border-gray-400 bg-white/60 p-2 text-[10px] normal-case tracking-normal text-gray-700">{detail}</pre>
+                                  </details>
+                                ) : (
+                                  <div key={`${step.name}-${stepIndex}`} className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-gray-600">
+                                    {label}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                         </details>
-                      )}
-                      {message.steps && message.steps.length > 0 && (
-                        <div className="mb-2 space-y-1">
-                          {message.steps.map((step, stepIndex) => {
-                            const icon = step.status === 'running' ? '⏳' : step.status === 'ok' ? '✓' : '✗';
-                            const detail = step.args && Object.keys(step.args).length > 0 ? JSON.stringify(step.args, null, 2) : null;
-                            const label = (
-                              <>
-                                <span>{icon}</span>
-                                <span className={step.status === 'running' ? 'animate-pulse' : ''}>{step.name}</span>
-                              </>
-                            );
-                            return detail ? (
-                              <details key={`${step.name}-${stepIndex}`} className="text-[10px] font-mono uppercase tracking-widest text-gray-600">
-                                <summary className="flex cursor-pointer items-center gap-2">{label}</summary>
-                                <pre className="ml-5 mt-1 whitespace-pre-wrap break-all border border-dashed border-gray-400 bg-white/60 p-2 text-[10px] normal-case tracking-normal text-gray-700">{detail}</pre>
-                              </details>
-                            ) : (
-                              <div key={`${step.name}-${stepIndex}`} className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-gray-600">
-                                {label}
-                              </div>
-                            );
-                          })}
-                        </div>
                       )}
                       <MarkdownContent content={message.content} />
                     </div>

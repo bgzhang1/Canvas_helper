@@ -95,7 +95,7 @@ export function SettingsView({
     setSaving('canvas');
     setError(null);
     try {
-      const canvas = await persistCanvasSettings(canvasApiToken);
+      const canvas = await persistCanvasSettings(settings.canvas_base_url, canvasApiToken);
       setCanvasApiToken('');
       onSettingsChange({
         ...settings,
@@ -111,11 +111,12 @@ export function SettingsView({
   }
 
   async function testCanvasSettings() {
+    if (!settings) return;
     setIsTestingCanvas(true);
     setCanvasTest(null);
     setError(null);
     try {
-      setCanvasTest(await requestCanvasSettingsTest(canvasApiToken));
+      setCanvasTest(await requestCanvasSettingsTest(settings.canvas_base_url, canvasApiToken));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -196,7 +197,12 @@ export function SettingsView({
             <AccordionHeader expanded={expanded.canvas} icon={<Database size={14} />} label={t('securityEnv')} onClick={() => toggleSection('canvas')} />
             {expanded.canvas && (
               <div className="settings-panel border border-black bg-[#F4F4F0] p-6 space-y-6">
-                <ConfigRow label={t('canvasBaseUrl')} value={settings.canvas_base_url} />
+                <TextField
+                  label={t('canvasBaseUrl')}
+                  value={settings.canvas_base_url}
+                  onChange={(value) => onSettingsChange({ ...settings, canvas_base_url: value })}
+                  placeholder="https://your-school.instructure.com/"
+                />
                 <div className="flex flex-col gap-2">
                   <label className="text-[10px] font-mono tracking-widest uppercase">{t('canvasApiToken')}</label>
                   <div className="border border-black px-4 py-2 text-sm font-mono bg-black text-[#F4F4F0] flex justify-between items-center gap-4">

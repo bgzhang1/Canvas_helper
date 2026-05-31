@@ -83,6 +83,7 @@ class ExtractionService:
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_text(text, encoding="utf-8", errors="replace")
                 outline = self._build_outline(text, row["display_name"])
+                outline_json = json.dumps(outline, ensure_ascii=False)
                 with self.db.connect() as conn:
                     conn.execute(
                         """
@@ -98,10 +99,30 @@ class ExtractionService:
                             status,
                             warning,
                             str(output),
-                            json.dumps(outline, ensure_ascii=False),
+                            outline_json,
                             utc_now(),
                             row["id"],
                         ),
+                    )
+                    self.db.upsert_search_document(
+                        conn,
+                        source="file",
+                        source_id=row["id"],
+                        course_id=course_id,
+                        title=row["display_name"],
+                        body=self.db.file_search_body(
+                            {
+                                "outline_json": outline_json,
+                                "extracted_text_path": str(output),
+                            },
+                            extracted_text=text,
+                        ),
+                        metadata={
+                            "content_type": row["content_type"],
+                            "updated_at": row["updated_at"],
+                            "extraction_status": status,
+                        },
+                        updated_at=row["updated_at"],
                     )
                 if status == "partial":
                     counts["partial"] += 1

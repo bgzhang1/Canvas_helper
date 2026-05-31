@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ..canvas_client import CanvasReadOnlyClient, CanvasSecurityError
 from ..runtime import (
     get_ai_settings,
     get_canvas_api_token,
+    get_canvas_base_url,
     get_canvas_settings,
     get_notification_settings,
     get_sync_settings,
@@ -46,26 +48,40 @@ async def app_settings() -> dict[str, Any]:
     }
 
 
+def _normalize_canvas_base_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Canvas base URL must be a valid https URL")
+    return value.rstrip("/") + "/"
+
+
 @router.put("/api/settings/canvas")
 async def put_canvas_settings(payload: CanvasSettingsIn) -> dict[str, Any]:
+    updates: dict[str, str] = {}
+    base_url = (payload.base_url or "").strip()
+    if base_url:
+        updates["canvas.base_url"] = _normalize_canvas_base_url(base_url)
     token = (payload.api_token or "").strip()
     if token:
-        state().db.put_settings({"canvas.api_token": token})
+        updates["canvas.api_token"] = token
+    if updates:
+        state().db.put_settings(updates)
     return get_canvas_settings()
 
 
 @router.post("/api/settings/canvas/test")
 async def test_canvas_settings(payload: CanvasSettingsTestIn) -> dict[str, Any]:
+    base_url = (payload.base_url or "").strip() or get_canvas_base_url()
     token = (payload.api_token or "").strip() or get_canvas_api_token()
     if not token:
         return {
             "ok": False,
-            "canvas_base_url": state().settings.canvas_base_url,
+            "canvas_base_url": base_url,
             "username": None,
             "message": "Canvas API token is not configured.",
         }
     async with CanvasReadOnlyClient(
-        state().settings.canvas_base_url,
+        base_url,
         token,
         timeout_seconds=state().settings.canvas_timeout_seconds,
         logger=logging.getLogger("canvas_audit"),
@@ -75,28 +91,28 @@ async def test_canvas_settings(payload: CanvasSettingsTestIn) -> dict[str, Any]:
         except httpx.HTTPStatusError as exc:
             return {
                 "ok": False,
-                "canvas_base_url": state().settings.canvas_base_url,
+                "canvas_base_url": base_url,
                 "username": None,
                 "message": f"Canvas returned HTTP {exc.response.status_code}.",
             }
         except CanvasSecurityError as exc:
             return {
                 "ok": False,
-                "canvas_base_url": state().settings.canvas_base_url,
+                "canvas_base_url": base_url,
                 "username": None,
                 "message": str(exc),
             }
         except httpx.RequestError as exc:
             return {
                 "ok": False,
-                "canvas_base_url": state().settings.canvas_base_url,
+                "canvas_base_url": base_url,
                 "username": None,
                 "message": f"Canvas connection failed: {exc.__class__.__name__}: {exc}",
             }
     username = profile.get("name") or profile.get("short_name") or profile.get("sortable_name") or profile.get("login_id")
     return {
         "ok": True,
-        "canvas_base_url": state().settings.canvas_base_url,
+        "canvas_base_url": base_url,
         "username": username or "Canvas user",
         "message": "Canvas base URL and API token are usable.",
     }

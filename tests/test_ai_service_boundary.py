@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.ai import AIAnalysisService, AIConfig
+from agent import AIAnalysisService, AIConfig
 from backend.app.db import Database
 
 

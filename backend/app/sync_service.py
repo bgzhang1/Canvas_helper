@@ -406,6 +406,8 @@ class SyncService:
         events: list[dict[str, Any]] = []
         with self.db.connect() as conn:
             for item in items:
+                title = item.get("title") or "Untitled announcement"
+                message = item.get("message")
                 raw_json = self._canonical_raw_json(item)
                 if self._raw_json_is_unchanged(conn, "SELECT raw_json FROM announcements WHERE id = ?", (item["id"],), raw_json):
                     unchanged += 1
@@ -418,7 +420,7 @@ class SyncService:
                             "course_id": course_id,
                             "course_name": course_name,
                             "item_id": item["id"],
-                            "item_name": item.get("title") or "Untitled announcement",
+                            "item_name": title,
                             "metadata": {"outcome": "unchanged", "posted_at": item.get("posted_at")},
                         }
                     )
@@ -438,13 +440,23 @@ class SyncService:
                     (
                         item["id"],
                         course_id,
-                        item.get("title") or "Untitled announcement",
-                        item.get("message"),
+                        title,
+                        message,
                         item.get("posted_at"),
                         item.get("user_name"),
                         raw_json,
                         now,
                     ),
+                )
+                self.db.upsert_search_document(
+                    conn,
+                    source="announcement",
+                    source_id=item["id"],
+                    course_id=course_id,
+                    title=title,
+                    body=message or "",
+                    metadata={"posted_at": item.get("posted_at"), "author_name": item.get("user_name")},
+                    updated_at=item.get("posted_at"),
                 )
                 updated += 1
                 events.append(
@@ -456,7 +468,7 @@ class SyncService:
                         "course_id": course_id,
                         "course_name": course_name,
                         "item_id": item["id"],
-                        "item_name": item.get("title") or "Untitled announcement",
+                        "item_name": title,
                         "metadata": {"outcome": "updated", "posted_at": item.get("posted_at")},
                     }
                 )
@@ -502,6 +514,7 @@ class SyncService:
         events: list[dict[str, Any]] = []
         with self.db.connect() as conn:
             for item in items:
+                name = item.get("name") or "Untitled assignment"
                 raw_json = self._canonical_raw_json(item)
                 if self._raw_json_is_unchanged(conn, "SELECT raw_json FROM assignments WHERE id = ?", (item["id"],), raw_json):
                     unchanged += 1
@@ -514,7 +527,7 @@ class SyncService:
                             "course_id": course_id,
                             "course_name": course_name,
                             "item_id": item["id"],
-                            "item_name": item.get("name") or "Untitled assignment",
+                            "item_name": name,
                             "metadata": {"outcome": "unchanged", "due_at": item.get("due_at")},
                         }
                     )
@@ -536,7 +549,7 @@ class SyncService:
                     (
                         item["id"],
                         course_id,
-                        item.get("name") or "Untitled assignment",
+                        name,
                         item.get("due_at"),
                         item.get("unlock_at"),
                         item.get("lock_at"),
@@ -545,6 +558,30 @@ class SyncService:
                         raw_json,
                         now,
                     ),
+                )
+                self.db.upsert_search_document(
+                    conn,
+                    source="assignment",
+                    source_id=item["id"],
+                    course_id=course_id,
+                    title=name,
+                    body=self.db.assignment_search_body(
+                        {
+                            "name": name,
+                            "due_at": item.get("due_at"),
+                            "unlock_at": item.get("unlock_at"),
+                            "lock_at": item.get("lock_at"),
+                            "points_possible": item.get("points_possible"),
+                            "raw_json": raw_json,
+                        }
+                    ),
+                    metadata={
+                        "due_at": item.get("due_at"),
+                        "unlock_at": item.get("unlock_at"),
+                        "lock_at": item.get("lock_at"),
+                        "points_possible": item.get("points_possible"),
+                    },
+                    updated_at=item.get("due_at") or item.get("unlock_at") or item.get("lock_at"),
                 )
                 updated += 1
                 events.append(
@@ -556,7 +593,7 @@ class SyncService:
                         "course_id": course_id,
                         "course_name": course_name,
                         "item_id": item["id"],
-                        "item_name": item.get("name") or "Untitled assignment",
+                        "item_name": name,
                         "metadata": {"outcome": "updated", "due_at": item.get("due_at")},
                     }
                 )
@@ -638,11 +675,15 @@ class SyncService:
         unchanged = 0
         with self.db.connect() as conn:
             for page, detail, page_url in details:
+                resolved_page_url = page_url or str(page.get("page_id") or page.get("id"))
+                title = detail.get("title") or page.get("title") or "Untitled page"
+                body = detail.get("body")
+                updated_at = detail.get("updated_at") or page.get("updated_at")
                 raw_json = self._canonical_raw_json(detail)
                 if self._raw_json_is_unchanged(
                     conn,
                     "SELECT raw_json FROM pages WHERE course_id = ? AND page_url = ?",
-                    (course_id, page_url or str(page.get("page_id") or page.get("id"))),
+                    (course_id, resolved_page_url),
                     raw_json,
                 ):
                     unchanged += 1
@@ -662,15 +703,25 @@ class SyncService:
                     """,
                     (
                         course_id,
-                        page_url or str(page.get("page_id") or page.get("id")),
+                        resolved_page_url,
                         detail.get("page_id") or page.get("page_id"),
-                        detail.get("title") or page.get("title") or "Untitled page",
-                        detail.get("body"),
-                        detail.get("updated_at") or page.get("updated_at"),
+                        title,
+                        body,
+                        updated_at,
                         1 if detail.get("published", page.get("published")) else 0,
                         raw_json,
                         now,
                     ),
+                )
+                self.db.upsert_search_document(
+                    conn,
+                    source="page",
+                    source_id=f"{course_id}:{resolved_page_url}",
+                    course_id=course_id,
+                    title=title,
+                    body=body or "",
+                    metadata={"page_url": resolved_page_url, "updated_at": updated_at},
+                    updated_at=updated_at,
                 )
                 updated += 1
         return {"seen": len(details), "updated": updated, "unchanged": unchanged}
@@ -805,6 +856,29 @@ class SyncService:
                         raw_json,
                         now,
                     ),
+                )
+                file_row = conn.execute(
+                    """
+                    SELECT id, course_id, display_name, content_type, updated_at,
+                           extraction_status, outline_json, extracted_text_path
+                    FROM files
+                    WHERE id = ?
+                    """,
+                    (item["id"],),
+                ).fetchone()
+                self.db.upsert_search_document(
+                    conn,
+                    source="file",
+                    source_id=item["id"],
+                    course_id=course_id,
+                    title=display_name,
+                    body=self.db.file_search_body(dict(file_row)) if file_row else "",
+                    metadata={
+                        "content_type": item.get("content-type") or item.get("content_type"),
+                        "updated_at": item.get("updated_at"),
+                    },
+                    updated_at=item.get("updated_at"),
+                    preserve_existing_body=True,
                 )
                 updated += 1
                 events.append(

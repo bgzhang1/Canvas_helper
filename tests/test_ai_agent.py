@@ -6,7 +6,7 @@ import shutil
 import httpx
 import pytest
 
-from backend.app.ai import (
+from agent import (
     AgentConfig,
     OpenAICompatAgent,
     SkillRegistry,
@@ -363,6 +363,113 @@ async def test_streaming_agent_falls_back_to_tool_results_when_final_response_is
     assert done["tools_used"] == ["search_course_materials"]
     assert "Tool results:" in done["content"]
     assert "Deadline reminder" in done["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_recovers_final_answer_when_first_final_is_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not [m for m in body["messages"] if m.get("tool_calls")]:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "search_course_materials",
+                                            "arguments": json.dumps({"query": "deadline", "limit": 3}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        nudged = any("no content" in (m.get("content") or "") for m in body["messages"])
+        content = "Lab 1 is due 2026-06-04." if nudged else ""
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        result = await agent.run(
+            system_prompt="Answer.",
+            user_payload=build_course_agent_input(course_payload()),
+            tools=build_course_agent_tools(course_payload()),
+        )
+
+    assert result.tools_used == ["search_course_materials"]
+    assert result.content == "Lab 1 is due 2026-06-04."
+    assert "Tool results:" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_streaming_agent_recovers_final_answer_when_first_final_is_empty() -> None:
+    def sse(*payloads: dict) -> str:
+        lines = [f"data: {json.dumps(payload)}\n" for payload in payloads]
+        lines.append("data: [DONE]\n")
+        return "\n".join(lines)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not [m for m in body["messages"] if m.get("tool_calls")]:
+            return httpx.Response(
+                200,
+                text=sse(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "search_course_materials",
+                                                "arguments": json.dumps({"query": "deadline", "limit": 3}),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+            )
+        nudged = any("no content" in (m.get("content") or "") for m in body["messages"])
+        content = "Lab 1 is due 2026-06-04." if nudged else ""
+        return httpx.Response(200, text=sse({"choices": [{"delta": {"content": content}}]}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = OpenAICompatAgent(
+            AgentConfig(base_url="https://llm.example/v1", api_key="test", model="model"),
+            client=client,
+        )
+        events = [
+            event
+            async for event in agent.run_stream(
+                system_prompt="Answer.",
+                user_payload=build_course_agent_input(course_payload()),
+                tools=build_course_agent_tools(course_payload()),
+            )
+        ]
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["tools_used"] == ["search_course_materials"]
+    assert done["content"] == "Lab 1 is due 2026-06-04."
+    assert any(event.get("type") == "delta" and "Lab 1" in event.get("content", "") for event in events)
 
 
 def test_grep_tool_searches_project_sandbox(tmp_path) -> None:

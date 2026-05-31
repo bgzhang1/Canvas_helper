@@ -12,10 +12,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..backup_service import BackupService
-from ..db import rows_to_dicts
-from ..notification_service import build_notification_agent_tools
-from ..runtime import (
+from backend.app.backup_service import BackupService
+from backend.app.db import rows_to_dicts
+from backend.app.notification_service import build_notification_agent_tools
+from backend.app.runtime import (
     make_canvas_client,
     make_extractor,
     make_notification_service,
@@ -41,7 +41,11 @@ AGENT_SYSTEM_PROMPT = (
     "search_course_materials; pass the course code (e.g. CS3334) as course when the user names one.\n\n"
     "If a file is found but not yet downloaded, call download_file before read_file. Use local/shell tools when "
     "useful; filesystem writes are allowed only inside the project sandbox, outside paths are read-only. Use "
-    "notification tools only for explicit notification or reminder requests."
+    "notification tools only for explicit notification or reminder requests.\n\n"
+    "Batch your tool calls: list_schedule, search_course_materials, and search_files accept arrays for course "
+    "(and search_course_materials also for query). Prefer a SINGLE call passing all the courses/keywords as arrays "
+    "(or omitting course to cover everything) instead of issuing the same tool many times for one course or one "
+    "keyword at a time."
 )
 
 
@@ -112,15 +116,37 @@ def build_agent_tools():
     )
 
 
+def _course_filters(value: Any) -> list[str]:
+    """Normalize a single course code/name or a list of them to lowercased filters."""
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    text = str(value or "").strip().lower()
+    return [text] if text else []
+
+
+def _course_matches(label: str, filters: list[str]) -> bool:
+    """True when no filter is set, or any filter is a substring of the course label."""
+    if not filters:
+        return True
+    low = label.lower()
+    return any(item in low for item in filters)
+
+
 def _course_search_tool() -> AgentTool:
     return AgentTool(
         name="search_course_materials",
-        description="Search synced course announcements, assignments, pages, and extracted file text. Filter by course code or name with 'course'.",
+        description="Search synced course announcements, assignments, pages, and extracted file text. Pass several keywords as a 'query' array and/or several courses as a 'course' array to run many searches in one call instead of repeating it.",
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Keywords to search for, e.g. 'final exam'."},
-                "course": {"type": "string", "description": "Optional course code or name filter, e.g. CS3334."},
+                "query": {
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "Keyword(s) to search for, e.g. 'final exam' or ['midterm','quiz','deadline'].",
+                },
+                "course": {
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "Optional course code/name filter, or an array of them, e.g. ['CS3334','CS3103'].",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
             },
             "required": ["query"],
@@ -130,12 +156,38 @@ def _course_search_tool() -> AgentTool:
 
 
 def _search_course_materials(args: dict[str, Any]) -> list[dict[str, Any]]:
-    query = str(args.get("query") or "").strip()
-    if not query:
+    raw_query = args.get("query")
+    if isinstance(raw_query, list):
+        queries = [str(item).strip() for item in raw_query if str(item).strip()]
+    else:
+        queries = [str(raw_query).strip()] if str(raw_query or "").strip() else []
+    if not queries:
         return []
-    needle = query.lower()
-    course_filter = str(args.get("course") or "").strip().lower()
+    course_filters = _course_filters(args.get("course")) or [""]
     limit = max(1, min(int(args.get("limit") or 8) if str(args.get("limit") or "8").isdigit() else 8, 20))
+
+    def run(query: str, course: str) -> list[dict[str, Any]]:
+        rows = state().db.search_course_materials(query, course=course, limit=limit)
+        return rows if rows else _search_course_materials_legacy(query, course, limit)
+
+    if len(queries) == 1 and len(course_filters) == 1:
+        return run(queries[0], course_filters[0])
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for query in queries:
+        for course in course_filters:
+            for row in run(query, course):
+                key = (row.get("course"), row.get("source"), row.get("title"), row.get("snippet"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(row)
+    return merged
+
+
+def _search_course_materials_legacy(query: str, course_filter: str, limit: int) -> list[dict[str, Any]]:
+    needle = query.lower()
+    course_filter = course_filter.lower()
     matches: list[dict[str, Any]] = []
     with state().db.connect() as conn:
         courses = rows_to_dicts(conn.execute("SELECT id, name, course_code FROM courses").fetchall())
@@ -195,12 +247,15 @@ def _match(labels: dict[int, str], course_id: int, source: str, title: str, blob
 def _file_search_tool() -> AgentTool:
     return AgentTool(
         name="search_files",
-        description="Search the synced course file index by name. Returns file_id, course, type, and download/extraction status.",
+        description="Search the synced course file index by name. Returns file_id, course, type, and download/extraction status. Pass an array of course codes/names to search several courses in one call.",
         parameters={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Text to match in the file name."},
-                "course": {"type": "string", "description": "Optional course code or name filter."},
+                "course": {
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "Optional course code/name filter, or an array of them.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 12},
             },
             "required": ["query"],
@@ -239,14 +294,18 @@ def _schedule_tool() -> AgentTool:
         name="list_schedule",
         description=(
             "Enumerate dated items (assignments and calendar events) across synced courses to build schedules or "
-            "find exam/test dates, even across all courses. Optionally filter by course code or name. Each item "
-            "includes course, title, its dates, and a details snippet (description/location) useful to tell "
-            "in-person tests from online ones."
+            "find exam/test dates, even across all courses. Call this ONCE: omit course to cover ALL synced courses, "
+            "or pass several course codes/names as an array to cover several in a single call instead of calling it "
+            "repeatedly per course. Each item includes course, title, its dates, and a details snippet "
+            "(description/location) useful to tell in-person tests from online ones."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "course": {"type": "string", "description": "Optional course code or name filter."},
+                "course": {
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "Optional course code/name filter, or an array of them to cover several at once.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
             },
         },
@@ -272,7 +331,7 @@ def _schedule_detail(raw_json: str | None, *keys: str) -> str:
 
 
 def _list_schedule(args: dict[str, Any]) -> list[dict[str, Any]]:
-    course_filter = str(args.get("course") or "").strip().lower()
+    course_filters = _course_filters(args.get("course"))
     limit = max(1, min(int(args["limit"]) if str(args.get("limit") or "").isdigit() else 100, 200))
     items: list[dict[str, Any]] = []
     with state().db.connect() as conn:
@@ -280,9 +339,7 @@ def _list_schedule(args: dict[str, Any]) -> list[dict[str, Any]]:
         course_ids = [
             c["id"]
             for c in courses
-            if not course_filter
-            or course_filter in (c.get("course_code") or "").lower()
-            or course_filter in (c.get("name") or "").lower()
+            if _course_matches(f"{c.get('course_code') or ''} {c.get('name') or ''}", course_filters)
         ]
         labels = {c["id"]: (c.get("course_code") or c.get("name") or f"course_{c['id']}") for c in courses}
         if not course_ids:
@@ -331,7 +388,7 @@ def _search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
     needle = str(args.get("query") or "").strip().lower()
     if not needle:
         return []
-    course_filter = str(args.get("course") or "").strip().lower()
+    course_filter = _course_filters(args.get("course"))
     limit = max(1, min(int(args["limit"]) if str(args.get("limit") or "").isdigit() else 12, 30))
     with state().db.connect() as conn:
         rows = rows_to_dicts(
@@ -346,8 +403,8 @@ def _search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
         )
     results = []
     for row in rows:
-        label = f"{row.get('course_code') or ''} {row.get('course_name') or ''}".lower()
-        if course_filter and course_filter not in label:
+        label = f"{row.get('course_code') or ''} {row.get('course_name') or ''}"
+        if not _course_matches(label, course_filter):
             continue
         if needle not in (row.get("display_name") or "").lower():
             continue

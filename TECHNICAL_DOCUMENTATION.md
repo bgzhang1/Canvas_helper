@@ -265,7 +265,7 @@ data/extracted/course_<course_id>/<file_id>.txt
 
 `outline_json` 由 `_build_outline()` 从文本中启发式提取最多 20 条标题候选；如果没有候选，回退为文件名。
 
-### 6.7 `ai/service.py` 与 `ai/agent.py`
+### 6.7 `agent/service.py` 与 `agent/agent.py`
 
 `AIAnalysisService` 只读取本地 SQLite 和本地抽取文本，不持有 Canvas 客户端、Canvas token 或 Canvas API 权限。
 

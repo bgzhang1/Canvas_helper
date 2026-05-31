@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import BackgroundTasks, HTTPException
 
-from .ai import AIAnalysisService, AIConfig
+from agent import AIAnalysisService, AIConfig
 from .backup_service import BackupService
 from .canvas_client import CanvasReadOnlyClient
 from .config import Settings
@@ -101,7 +101,7 @@ def project_root() -> Path:
 def make_canvas_client() -> CanvasReadOnlyClient:
     settings = state().settings
     return CanvasReadOnlyClient(
-        settings.canvas_base_url,
+        get_canvas_base_url(),
         get_canvas_api_token(),
         timeout_seconds=settings.canvas_timeout_seconds,
         download_timeout_seconds=settings.canvas_download_timeout_seconds,
@@ -187,9 +187,14 @@ def get_canvas_api_token() -> str:
     return state().db.get_setting("canvas.api_token", settings.canvas_api_token or "") or ""
 
 
+def get_canvas_base_url() -> str:
+    settings = state().settings
+    return state().db.get_setting("canvas.base_url", settings.canvas_base_url) or settings.canvas_base_url
+
+
 def get_canvas_settings() -> dict[str, Any]:
     return {
-        "canvas_base_url": state().settings.canvas_base_url,
+        "canvas_base_url": get_canvas_base_url(),
         "token_configured": bool(get_canvas_api_token()),
     }
 

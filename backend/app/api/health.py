@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
-from ..runtime import get_canvas_api_token, state
+from ..runtime import get_canvas_api_token, get_canvas_base_url, state
 
 router = APIRouter()
 
@@ -15,7 +15,7 @@ async def health() -> dict[str, Any]:
     def query() -> dict[str, Any]:
         return {
             "ok": True,
-            "canvas_base_url": state().settings.canvas_base_url,
+            "canvas_base_url": get_canvas_base_url(),
             "token_configured": bool(get_canvas_api_token()),
             "latest_sync": state().db.latest_sync_run(),
         }

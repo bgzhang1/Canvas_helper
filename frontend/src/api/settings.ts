@@ -7,17 +7,17 @@ export function fetchSettings(): Promise<AppSettings> {
   return api<AppSettings>('/api/settings');
 }
 
-export function saveCanvasSettings(apiToken: string): Promise<CanvasSettingsResponse> {
+export function saveCanvasSettings(baseUrl: string, apiToken: string): Promise<CanvasSettingsResponse> {
   return api<CanvasSettingsResponse>('/api/settings/canvas', {
     method: 'PUT',
-    body: JSON.stringify({ api_token: apiToken })
+    body: JSON.stringify({ base_url: baseUrl, api_token: apiToken })
   });
 }
 
-export function testCanvasSettings(apiToken: string): Promise<CanvasTestResult> {
+export function testCanvasSettings(baseUrl: string, apiToken: string): Promise<CanvasTestResult> {
   return api<CanvasTestResult>('/api/settings/canvas/test', {
     method: 'POST',
-    body: JSON.stringify({ api_token: apiToken })
+    body: JSON.stringify({ base_url: baseUrl, api_token: apiToken })
   });
 }
 
