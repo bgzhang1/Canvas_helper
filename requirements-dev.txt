@@ -1,4 +1,0 @@
-# Development/test dependencies. Installs runtime deps too.
--r requirements.txt
-pytest==9.0.3
-pytest-asyncio==1.4.0

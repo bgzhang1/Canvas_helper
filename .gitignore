@@ -27,3 +27,6 @@ test-artifacts/
 # Exclude tests and scheduled task scripts
 tests/
 scripts/
+pytest.ini
+requirements-dev.txt
+
