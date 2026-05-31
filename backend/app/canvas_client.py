@@ -51,6 +51,10 @@ class CanvasReadOnlyClient:
     def _headers(self) -> dict[str, str]:
         if not self._token:
             raise CanvasSecurityError("CANVAS_API_TOKEN is not configured")
+        try:
+            self._token.encode("ascii")
+        except UnicodeEncodeError:
+            raise CanvasSecurityError("CANVAS_API_TOKEN contains invalid non-ASCII characters")
         return {"Authorization": f"Bearer {self._token}"}
 
     def _headers_for_url(self, url: str) -> dict[str, str]:

@@ -23,3 +23,7 @@ backend/.mypy_cache/
 test-artifacts/
 
 .DS_Store
+
+# Exclude tests and scheduled task scripts
+tests/
+scripts/
