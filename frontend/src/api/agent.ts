@@ -69,14 +69,18 @@ export async function streamAgentMessage(
   const decoder = new TextDecoder();
   let buffer = '';
   let doneMessage: AgentChatMessage | null = null;
+  let streamedContent = '';
+  const streamedTools = new Set<string>();
 
   function handleEvent(event: Record<string, unknown> | null) {
     if (!event) return;
     if (event.type === 'delta' && typeof event.content === 'string') {
+      streamedContent += event.content;
       handlers.onDelta?.(event.content);
     } else if (event.type === 'thinking' && typeof event.content === 'string') {
       handlers.onThinking?.(event.content);
     } else if (event.type === 'tool' && typeof event.name === 'string') {
+      if (event.phase !== 'start' && Boolean(event.ok)) streamedTools.add(event.name);
       handlers.onTool?.({
         name: event.name,
         phase: event.phase === 'start' ? 'start' : 'end',
@@ -108,7 +112,17 @@ export async function streamAgentMessage(
   if (buffer.trim()) {
     handleEvent(parseStreamLine(buffer));
   }
-  if (!doneMessage) throw new Error('Agent stream ended without a final message.');
+  if (!doneMessage) {
+    // 兜底：流意外结束（连接中断或服务端未发送 done）时，保留已接收的增量内容，而不是丢弃并报错。
+    const fallback: AgentChatMessage = {
+      role: 'assistant',
+      content: streamedContent.trim() || '(stream ended before completion)',
+      tools_used: [...streamedTools],
+      status: streamedContent.trim() ? 'ok' : 'error'
+    };
+    handlers.onDone?.(fallback);
+    return fallback;
+  }
   return doneMessage;
 }
 

@@ -47,16 +47,16 @@ class NotificationSettingsIn(BaseModel):
 
 class AgentChatMessageIn(BaseModel):
     role: str
-    content: str
+    content: str = Field(default="", max_length=200_000)
 
 
 class AgentChatIn(BaseModel):
-    message: str
-    history: list[AgentChatMessageIn] = Field(default_factory=list)
+    message: str = Field(max_length=50_000)
+    history: list[AgentChatMessageIn] = Field(default_factory=list, max_length=100)
     course_id: int | None = None
     session_id: str | None = None
     session_title: str | None = None
 
 
 class FileSelectionIn(BaseModel):
-    file_ids: list[int] = Field(default_factory=list)
+    file_ids: list[int] = Field(default_factory=list, max_length=1000)

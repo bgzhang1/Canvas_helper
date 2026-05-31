@@ -278,7 +278,7 @@ async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dic
     )
     try:
         async with make_canvas_client() as canvas:
-            backup = BackupService(state().db, canvas, state().settings.data_dir)
+            backup = BackupService(state().db, canvas, state().settings.data_dir, min_free_bytes=state().settings.backup_min_free_bytes)
             backup_counts = await backup.backup_files(course_id, payload.file_ids)
         extraction_counts = await make_extractor().extract_files(course_id, payload.file_ids)
     except Exception as exc:
@@ -324,13 +324,13 @@ async def sync_course_files(course_id: int) -> dict[str, Any]:
         )
         try:
             async with make_canvas_client() as canvas:
-                backup = BackupService(state().db, canvas, state().settings.data_dir)
+                backup = BackupService(state().db, canvas, state().settings.data_dir, min_free_bytes=state().settings.backup_min_free_bytes)
                 service = SyncService(
                     state().db,
                     canvas,
                     backup,
                     make_extractor(),
-                    is_cancelled=state().sync_cancel_event.is_set,
+                    is_cancelled=state().file_sync_cancel_event.is_set,
                 )
                 result = await service.sync_course_files(course_id)
             state().db.add_event(

@@ -22,11 +22,23 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_languages: str = "eng+chi_sim"
     ocr_max_pages: int = 20
+    ocr_timeout_seconds: int = 30
 
     canvas_timeout_seconds: float = 60.0
     canvas_download_timeout_seconds: float = 180.0
+    canvas_max_retries: int = 2
+    canvas_max_pages: int = 200
+    canvas_max_download_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB per file
+    backup_min_free_bytes: int = 512 * 1024 * 1024  # keep 512 MiB headroom
 
-    agent_shell_tools_enabled: bool = True
+    # Bash/grep tools expose broad local filesystem access to the model and are
+    # off by default; enable explicitly only on a trusted machine.
+    agent_shell_tools_enabled: bool = False
+
+    # Interactive chat agent runtime budget (tunable for slow/cheap providers).
+    agent_request_timeout_seconds: float = 120.0
+    agent_tool_timeout_seconds: float = 60.0
+    agent_max_tool_rounds: int = 6
 
     notification_email_from: str = "canvas-helper@localhost"
     notification_smtp_host: str | None = None

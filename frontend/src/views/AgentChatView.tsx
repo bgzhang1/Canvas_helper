@@ -45,6 +45,8 @@ export function AgentChatView({
   const [loadingModels, setLoadingModels] = useState(false);
   const [menu, setMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const atBottomRef = useRef(true);
+  const [elapsed, setElapsed] = useState(0);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const messages = activeSession?.messages ?? [];
@@ -54,16 +56,36 @@ export function AgentChatView({
   }, [activeSession, activeSessionId]);
 
   useEffect(() => {
-    persistSessions(sessions, activeSessionId);
-  }, [sessions, activeSessionId]);
+    // 流式期间合并写入：每个 token 都触发 setSessions，避免每块都 JSON.stringify 落盘造成卡顿。
+    const handle = window.setTimeout(() => persistSessions(sessions, activeSessionId), sending ? 600 : 0);
+    return () => window.clearTimeout(handle);
+  }, [sessions, activeSessionId, sending]);
 
   useEffect(() => {
     setSelectedCourseId(activeSession?.courseId ?? null);
   }, [activeSession?.id]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, sending, activeSessionId]);
+    // 仅当用户已贴近底部时才自动滚动，避免在用户上翻阅读时把视口拽回底部；流式期间用即时滚动减少抖动。
+    const el = scrollRef.current;
+    if (el && atBottomRef.current) el.scrollTo({ top: el.scrollHeight });
+  }, [messages, sending]);
+
+  useEffect(() => {
+    atBottomRef.current = true;
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight });
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!sending) {
+      setElapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [sending]);
 
   useEffect(() => {
     loadAgentLogs().catch(() => undefined);
@@ -165,6 +187,11 @@ export function AgentChatView({
   function interrupt() {
     abortRef.current?.abort();
     setQueued([]);
+  }
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }
 
   function submit(event?: FormEvent) {
@@ -391,7 +418,7 @@ export function AgentChatView({
           </button>
         </div>
         <div className="relative flex-1 min-h-0 border border-black bg-[#F4F4F0] overflow-hidden">
-          <div ref={scrollRef} className="h-full min-h-0 overflow-y-auto">
+          <div ref={scrollRef} onScroll={handleScroll} className="h-full min-h-0 overflow-y-auto">
             {messages.length === 0 ? (
               <div className="h-full min-h-[480px] flex items-center justify-center text-[10px] font-mono tracking-widest uppercase text-gray-500">
                 {t('agentReady')}
@@ -407,7 +434,10 @@ export function AgentChatView({
                       <div className="mb-2 flex items-center gap-2 text-[10px] font-mono font-bold uppercase tracking-widest">
                         <span>{message.role === 'user' ? t('you') : t('agent')}</span>
                         {message.role === 'assistant' && message.status === 'streaming' && (
-                          <span className="animate-pulse text-gray-500">{t('agentWorking')}</span>
+                          <span className="animate-pulse text-gray-500">
+                            {t('agentWorking')}
+                            {elapsed > 0 ? ` · ${elapsed}s` : ''}
+                          </span>
                         )}
                         {message.role === 'assistant' && message.status === 'error' && (
                           <span className="text-red-700">{t('agentFailed')}</span>
@@ -423,7 +453,7 @@ export function AgentChatView({
                             <div className="mt-2 space-y-1">
                               {message.steps.map((step, stepIndex) => {
                                 const icon = step.status === 'running' ? '⏳' : step.status === 'ok' ? '✓' : '✗';
-                                const detail = step.args && Object.keys(step.args).length > 0 ? JSON.stringify(step.args, null, 2) : null;
+                                const detail = step.args && Object.keys(step.args).length > 0 ? truncate(JSON.stringify(step.args, null, 2), 1500) : null;
                                 const label = (
                                   <>
                                     <span>{icon}</span>
@@ -613,6 +643,10 @@ function createId() {
 
 function titleFromMessage(message: string) {
   return message.replace(/\s+/g, ' ').slice(0, 56) || 'New chat';
+}
+
+function truncate(text: string, limit: number) {
+  return text.length > limit ? `${text.slice(0, limit)}\n…[truncated]` : text;
 }
 
 function eventDetailLines(event: EventLog): string[] {

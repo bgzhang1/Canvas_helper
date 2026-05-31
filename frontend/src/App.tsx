@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, MessageSquare, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
 import type { Lang, TFunction } from './i18n';
@@ -8,16 +8,18 @@ import { AppContext, type AppContextValue } from './context/AppContext';
 import { EmptyState, GridBackground } from './components/ui';
 import { SidebarButton } from './components/SidebarButton';
 import { SyncProgressBar } from './components/SyncProgressBar';
-import { DashboardView } from './views/DashboardView';
-import { CourseDetailView } from './views/CourseDetailView';
-import { AgentChatView } from './views/AgentChatView';
-import { SettingsView } from './views/SettingsView';
 import { courseCode, statusForCourse } from './utils/course';
 import { analysisStatusToProgress, parseSyncProgress } from './utils/progress';
 import { useTermGroups } from './hooks/useTermGroups';
 import { useCanvasData } from './hooks/useCanvasData';
 import { useAnnouncementsSeen } from './hooks/useAnnouncementsSeen';
 import { useExternalLinkHardening } from './hooks/useExternalLinkHardening';
+
+// Route-level code splitting (4.7): each view ships as its own chunk, loaded on demand.
+const DashboardView = lazy(() => import('./views/DashboardView').then((m) => ({ default: m.DashboardView })));
+const CourseDetailView = lazy(() => import('./views/CourseDetailView').then((m) => ({ default: m.CourseDetailView })));
+const AgentChatView = lazy(() => import('./views/AgentChatView').then((m) => ({ default: m.AgentChatView })));
+const SettingsView = lazy(() => import('./views/SettingsView').then((m) => ({ default: m.SettingsView })));
 
 export function App() {
   const navigate = useNavigate();
@@ -393,6 +395,7 @@ export function App() {
           )}
 
           <div className="app-content flex-1 min-h-0 overflow-y-auto p-12">
+            <Suspense fallback={<EmptyState>{t('loadingCourseMaterial')}</EmptyState>}>
             <Routes>
               <Route
                 path="/"
@@ -432,6 +435,7 @@ export function App() {
               />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </Suspense>
           </div>
         </main>
       </div>

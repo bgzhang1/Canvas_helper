@@ -1477,6 +1477,8 @@ def _grep_workspace(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     if not pattern:
         raise ValueError("pattern is required")
     search_path = _resolve_read_path(root, str(args.get("path") or "."))
+    if _is_sensitive_read_path(search_path):
+        raise ValueError("refusing to read a sensitive path")
     include = _normalize_include_patterns(args.get("include"))
     max_matches = _bounded_int(args.get("max_matches"), default=20, minimum=1, maximum=100)
     case_sensitive = bool(args.get("case_sensitive", False))
@@ -1504,6 +1506,19 @@ def _grep_workspace(root: Path, args: dict[str, Any]) -> dict[str, Any]:
             if len(matches) >= max_matches:
                 return {"matches": matches, "truncated": True}
     return {"matches": matches, "truncated": False}
+
+
+_SENSITIVE_READ_MARKERS = (
+    "/.ssh", "/.aws", "/.gnupg", "/.gcloud", "/.azure", "/.kube", "/.config/gh",
+    "/.docker", "/.npmrc", "/.netrc", "/.git-credentials", "/.pypirc",
+    "id_rsa", "id_ed25519", "id_dsa", "credentials", "secret", ".pem", ".env",
+)
+
+
+def _is_sensitive_read_path(value: Any) -> bool:
+    """Best-effort guard so prompt-injected content cannot read credential/secret files."""
+    text = str(value).replace("\\", "/").lower()
+    return any(marker in text for marker in _SENSITIVE_READ_MARKERS)
 
 
 def _resolve_workspace_path(root: Path, value: str) -> Path:
@@ -1599,6 +1614,9 @@ def _validate_bash_command(command: str, root: Path, cwd: Path) -> None:
             raise ValueError(f"bash command uses blocked command: {name}")
 
     tokens = _shell_tokens(command)
+    for token in tokens:
+        if _is_sensitive_read_path(token):
+            raise ValueError(f"bash command may not access a sensitive path: {token}")
     _validate_redirections(tokens, root, cwd)
     _validate_mutating_commands(tokens, root, cwd)
 
@@ -1745,6 +1763,8 @@ def _normalize_include_patterns(value: Any) -> list[str]:
 def _iter_workspace_text_files(path: Path, include: list[str]):
     for file_path in _walk_text_files(path):
         if file_path.name.startswith("."):
+            continue
+        if _is_sensitive_read_path(file_path):
             continue
         if file_path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".bin", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".zip"}:
             continue

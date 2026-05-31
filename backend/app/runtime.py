@@ -47,6 +47,7 @@ class AppState:
         self.file_sync_lock = asyncio.Lock()
         self.analysis_lock = asyncio.Lock()
         self.sync_cancel_event = asyncio.Event()
+        self.file_sync_cancel_event = asyncio.Event()
         self.scheduler_task: asyncio.Task | None = None
         self.analysis_progress = initial_analysis_progress()
 
@@ -105,6 +106,9 @@ def make_canvas_client() -> CanvasReadOnlyClient:
         get_canvas_api_token(),
         timeout_seconds=settings.canvas_timeout_seconds,
         download_timeout_seconds=settings.canvas_download_timeout_seconds,
+        max_retries=settings.canvas_max_retries,
+        max_pages=settings.canvas_max_pages,
+        max_download_bytes=settings.canvas_max_download_bytes,
         logger=logging.getLogger("canvas_audit"),
     )
 
@@ -117,6 +121,7 @@ def make_extractor() -> ExtractionService:
         ocr_enabled=settings.ocr_enabled,
         ocr_languages=settings.ocr_languages,
         ocr_max_pages=settings.ocr_max_pages,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
     )
 
 
@@ -253,7 +258,12 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
     async with app_state.sync_lock:
         try:
             async with make_canvas_client() as canvas:
-                backup = BackupService(app_state.db, canvas, app_state.settings.data_dir)
+                backup = BackupService(
+                    app_state.db,
+                    canvas,
+                    app_state.settings.data_dir,
+                    min_free_bytes=app_state.settings.backup_min_free_bytes,
+                )
                 service = SyncService(
                     app_state.db,
                     canvas,

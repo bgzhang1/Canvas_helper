@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -19,12 +20,14 @@ class ExtractionService:
         ocr_enabled: bool = True,
         ocr_languages: str = "eng+chi_sim",
         ocr_max_pages: int = 20,
+        ocr_timeout_seconds: int = 30,
     ):
         self.db = db
         self.data_dir = data_dir
         self.ocr_enabled = ocr_enabled
         self.ocr_languages = ocr_languages
         self.ocr_max_pages = ocr_max_pages
+        self.ocr_timeout_seconds = ocr_timeout_seconds
 
     async def extract_course(self, course_id: int) -> dict[str, int]:
         return await self.extract_files(course_id)
@@ -73,7 +76,9 @@ class ExtractionService:
                         metadata={"outcome": "skipped"},
                     )
                     continue
-                text, status, warning = self.extract_file(local_path, row["content_type"])
+                text, status, warning = await asyncio.to_thread(
+                    self.extract_file, local_path, row["content_type"]
+                )
                 output = (
                     self.data_dir
                     / "extracted"
@@ -228,7 +233,7 @@ class ExtractionService:
             pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
         image = Image.open(io.BytesIO(pixmap.tobytes("png")))
         try:
-            return pytesseract.image_to_string(image, lang=self.ocr_languages), None
+            return pytesseract.image_to_string(image, lang=self.ocr_languages, timeout=self.ocr_timeout_seconds), None
         except Exception as exc:
             return "", f"OCR failed: {exc.__class__.__name__}"
 
@@ -250,7 +255,7 @@ class ExtractionService:
                         import pytesseract
 
                         pil_image = Image.open(io.BytesIO(image.blob))
-                        ocr_text = pytesseract.image_to_string(pil_image, lang=self.ocr_languages)
+                        ocr_text = pytesseract.image_to_string(pil_image, lang=self.ocr_languages, timeout=self.ocr_timeout_seconds)
                         if ocr_text.strip():
                             chunks.append("\n[OCR]\n" + ocr_text)
                     except Exception as exc:
@@ -277,7 +282,7 @@ class ExtractionService:
                     import pytesseract
 
                     image = Image.open(io.BytesIO(rel.target_part.blob))
-                    ocr_text = pytesseract.image_to_string(image, lang=self.ocr_languages)
+                    ocr_text = pytesseract.image_to_string(image, lang=self.ocr_languages, timeout=self.ocr_timeout_seconds)
                     if ocr_text.strip():
                         chunks.append("\n[OCR]\n" + ocr_text)
                 except Exception as exc:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import smtplib
+import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -64,9 +65,20 @@ class NotificationService:
             client = httpx.Client(timeout=15.0)
             close_client = True
         try:
-            response = client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
+            data = None
+            for attempt in range(3):
+                try:
+                    response = client.post(url, json=payload)
+                    if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                        time.sleep(0.5 * (2**attempt))
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except httpx.TransportError:
+                    if attempt >= 2:
+                        raise
+                    time.sleep(0.5 * (2**attempt))
         finally:
             if close_client:
                 client.close()
