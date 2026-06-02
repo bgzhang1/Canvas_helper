@@ -194,7 +194,7 @@ class OpenAICompatAgent:
         system_prompt: str,
         user_payload: dict[str, Any],
         tools: list[AgentTool] | None = None,
-        response_format_json: bool = False,
+        response_format_json: bool | dict[str, Any] = False,
         temperature: float = 0.2,
         cancel_check: Callable[[], None] | None = None,
     ) -> AgentRunResult:
@@ -209,7 +209,7 @@ class OpenAICompatAgent:
         flags = _RequestFlags(
             tools=bool(tools),
             reasoning=bool(self.config.reasoning_effort),
-            response_format=response_format_json,
+            response_format=bool(response_format_json),
         )
         fallback_without_tools = False
 
@@ -317,7 +317,7 @@ class OpenAICompatAgent:
         system_prompt: str,
         user_payload: dict[str, Any],
         tools: list[AgentTool] | None = None,
-        response_format_json: bool = False,
+        response_format_json: bool | dict[str, Any] = False,
         temperature: float = 0.2,
         cancel_check: Callable[[], None] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -332,7 +332,7 @@ class OpenAICompatAgent:
         flags = _RequestFlags(
             tools=bool(tools),
             reasoning=bool(self.config.reasoning_effort),
-            response_format=response_format_json,
+            response_format=bool(response_format_json),
         )
         fallback_without_tools = False
         content_parts: list[str] = []
@@ -573,7 +573,7 @@ class OpenAICompatAgent:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         *,
-        response_format_json: bool,
+        response_format_json: bool | dict[str, Any],
         temperature: float | None,
         reasoning_effort: str | None,
         stream: bool,
@@ -588,7 +588,10 @@ class OpenAICompatAgent:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         if response_format_json:
-            body["response_format"] = {"type": "json_object"}
+            if isinstance(response_format_json, dict):
+                body["response_format"] = response_format_json
+            else:
+                body["response_format"] = {"type": "json_object"}
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         key = (self.config.api_key or "").strip()
@@ -611,7 +614,7 @@ class OpenAICompatAgent:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         *,
-        response_format_json: bool,
+        response_format_json: bool | dict[str, Any],
         temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -652,7 +655,7 @@ class OpenAICompatAgent:
         messages: list[dict[str, Any]],
         flags: _RequestFlags,
         *,
-        response_format_json: bool,
+        response_format_json: bool | dict[str, Any],
         temperature: float | None,
     ) -> tuple[str, dict[str, Any]]:
         """Re-prompt (without tools) to recover a final answer when the model returns empty content."""
@@ -686,7 +689,7 @@ class OpenAICompatAgent:
         messages: list[dict[str, Any]],
         flags: _RequestFlags,
         *,
-        response_format_json: bool,
+        response_format_json: bool | dict[str, Any],
         temperature: float | None,
         usage: dict[str, int],
         out: list[str],
@@ -730,7 +733,7 @@ class OpenAICompatAgent:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         *,
-        response_format_json: bool,
+        response_format_json: bool | dict[str, Any],
         temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -963,7 +966,7 @@ def _message_reasoning(message: dict[str, Any]) -> str:
     return ""
 
 
-def _fallback_tool_response(events: list[AgentToolEvent], *, response_format_json: bool) -> str:
+def _fallback_tool_response(events: list[AgentToolEvent], *, response_format_json: bool | dict[str, Any]) -> str:
     if not events:
         return ""
     successes = [event for event in events if event.ok]
