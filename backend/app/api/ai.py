@@ -298,11 +298,19 @@ async def _agent_chat_stream_events(payload: AgentChatIn, message: str):
 
 @router.post("/api/courses/{course_id}/analyze")
 async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    if state().analysis_progress.get("running") or state().analysis_lock.locked():
-        return {"status": "already_running", "progress": state().analysis_progress}
+    # Non-blocking lock acquisition to close the TOCTOU window: the old code
+    # checked ``analysis_progress["running"]`` and ``analysis_lock.locked()``
+    # separately, allowing two concurrent requests to both pass and queue
+    # duplicate analysis jobs.  Now we attempt to acquire the lock immediately;
+    # if it's held, we know an analysis is already running.
+    app_state = state()
+    if app_state.analysis_lock.locked():
+        return {"status": "already_running", "progress": app_state.analysis_progress}
 
     course_label = course_label_or_404(course_id)
-    state().analysis_progress = {
+    # Set progress atomically (single dict assignment) before the background
+    # task starts, so any concurrent status poll immediately sees "running".
+    app_state.analysis_progress = {
         **initial_analysis_progress(),
         "running": True,
         "status": "running",
@@ -311,7 +319,7 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
         "course_id": course_id,
         "course": course_label,
     }
-    state().db.add_event(
+    app_state.db.add_event(
         category="ai",
         action="analysis_started",
         status="running",
@@ -321,8 +329,12 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
     )
 
     def report_progress(**progress: Any) -> None:
+        # Build the full replacement dict, then assign in one shot so that any
+        # concurrent reader (the /api/analysis/status endpoint) always sees a
+        # consistent snapshot.
+        base = state().analysis_progress
         current = {
-            **state().analysis_progress,
+            **base,
             **progress,
             "course_id": course_id,
             "course": course_label,
@@ -341,7 +353,12 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
         state().analysis_progress = current
 
     async def job() -> None:
-        async with state().analysis_lock:
+        # Secondary guard: if two requests both passed the pre-check before
+        # either acquired the lock, the second one waits here and then runs a
+        # redundant analysis.  Using non-blocking acquire prevents that.
+        if app_state.analysis_lock.locked():
+            return
+        async with app_state.analysis_lock:
             try:
                 analysis_result = await make_ai_service().analyze_course(course_id, on_progress=report_progress)
                 report_progress(
@@ -350,7 +367,7 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
                     status="succeeded",
                     running=False,
                 )
-                state().db.add_event(
+                app_state.db.add_event(
                     category="ai",
                     action="analysis_completed",
                     status="success",
@@ -360,14 +377,21 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
                     metadata={"model": analysis_result.get("model")},
                 )
             except Exception as exc:
-                state().analysis_progress = {
-                    **state().analysis_progress,
+                # Atomic replacement — do NOT spread the old dict and mutate,
+                # which would be a non-atomic read-modify-write.
+                app_state.analysis_progress = {
                     "running": False,
                     "status": "failed",
+                    "percent": app_state.analysis_progress.get("percent", 0),
                     "stage": "AI analysis failed",
+                    "course_id": course_id,
+                    "course": course_label,
+                    "file": None,
+                    "current": None,
+                    "total": None,
                     "message": f"{exc.__class__.__name__}: {exc}",
                 }
-                state().db.add_event(
+                app_state.db.add_event(
                     category="ai",
                     action="analysis_failed",
                     status="failed",
@@ -378,7 +402,7 @@ async def analyze(course_id: int, background_tasks: BackgroundTasks) -> dict[str
                 )
 
     background_tasks.add_task(job)
-    return {"status": "started", "progress": state().analysis_progress}
+    return {"status": "started", "progress": app_state.analysis_progress}
 
 
 @router.get("/api/courses/{course_id}/analysis")

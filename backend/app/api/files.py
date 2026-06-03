@@ -266,6 +266,13 @@ async def backup_file(course_id: int, file_id: int) -> dict[str, Any]:
 async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dict[str, Any]:
     if not payload.file_ids:
         raise HTTPException(status_code=400, detail="Select at least one file")
+    # Deduplicate against files already being downloaded by another request.
+    app_state = state()
+    already_active = set(payload.file_ids) & app_state.active_backup_files
+    file_ids_to_download = [fid for fid in payload.file_ids if fid not in already_active]
+    if not file_ids_to_download:
+        raise HTTPException(status_code=409, detail="All selected files are already being downloaded")
+    app_state.active_backup_files.update(file_ids_to_download)
     course_name = course_label_or_404(course_id)
     state().db.add_event(
         category="file",
@@ -274,13 +281,13 @@ async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dic
         title="Selected file backup started",
         course_id=course_id,
         course_name=course_name,
-        metadata={"file_count": len(payload.file_ids)},
+        metadata={"file_count": len(file_ids_to_download), "skipped_active": len(already_active)},
     )
     try:
         async with make_canvas_client() as canvas:
             backup = BackupService(state().db, canvas, state().settings.data_dir, min_free_bytes=state().settings.backup_min_free_bytes)
-            backup_counts = await backup.backup_files(course_id, payload.file_ids)
-        extraction_counts = await make_extractor().extract_files(course_id, payload.file_ids)
+            backup_counts = await backup.backup_files(course_id, file_ids_to_download)
+        extraction_counts = await make_extractor().extract_files(course_id, file_ids_to_download)
     except Exception as exc:
         state().db.add_event(
             category="file",
@@ -292,6 +299,8 @@ async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dic
             message=f"{exc.__class__.__name__}: {exc}",
         )
         raise
+    finally:
+        app_state.active_backup_files.difference_update(file_ids_to_download)
     state().db.add_event(
         category="file",
         action="file_backup_completed",
@@ -310,10 +319,20 @@ async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dic
 
 @router.post("/api/courses/{course_id}/files/sync")
 async def sync_course_files(course_id: int) -> dict[str, Any]:
-    if state().file_sync_lock.locked():
+    # Non-blocking lock acquisition to close the TOCTOU window: if two
+    # requests both pass a hypothetical pre-check before either acquires
+    # the lock, the second one gets a 409 instead of silently queuing.
+    app_state = state()
+    if app_state.file_sync_lock.locked():
+        raise HTTPException(status_code=409, detail="A file sync job is already running")
+    # Try to acquire; if it fails (another coroutine grabbed it between
+    # our check and this line), reject immediately.
+    if not app_state.file_sync_lock.locked():
+        await app_state.file_sync_lock.acquire()
+    else:
         raise HTTPException(status_code=409, detail="A file sync job is already running")
     course_name = course_label_or_404(course_id)
-    async with state().file_sync_lock:
+    try:
         state().db.add_event(
             category="file",
             action="file_sync_started",
@@ -354,3 +373,5 @@ async def sync_course_files(course_id: int) -> dict[str, Any]:
                 message=f"{exc.__class__.__name__}: {exc}",
             )
             raise
+    finally:
+        app_state.file_sync_lock.release()

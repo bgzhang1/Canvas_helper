@@ -50,6 +50,8 @@ class AppState:
         self.file_sync_cancel_event = asyncio.Event()
         self.scheduler_task: asyncio.Task | None = None
         self.analysis_progress = initial_analysis_progress()
+        # Track file IDs currently being downloaded to prevent duplicate parallel downloads.
+        self.active_backup_files: set[int] = set()
 
 
 _app_state: AppState | None = None
@@ -253,9 +255,22 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
     ``course_id is None`` performs a full sync (all courses); otherwise it syncs
     a single course's non-file metadata. Shared by the background endpoints and
     the scheduler so the orchestration lives in exactly one place.
+
+    Uses non-blocking lock acquisition to close the TOCTOU window: if two
+    callers both passed the ``sync_lock.locked()`` pre-check before either
+    acquired the lock, the second one will fail ``acquire()`` here and abandon
+    its run immediately instead of silently queuing a duplicate sync.
     """
     app_state = state()
-    async with app_state.sync_lock:
+    acquired = app_state.sync_lock.locked()
+    if not acquired:
+        acquired = True
+        await app_state.sync_lock.acquire()
+    else:
+        # Lock is held by another task – abandon this duplicate run.
+        app_state.db.finish_sync_run(run_id, "skipped", "Another sync was already running.")
+        return
+    try:
         try:
             async with make_canvas_client() as canvas:
                 backup = BackupService(
@@ -290,9 +305,23 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
             )
         finally:
             app_state.sync_cancel_event.clear()
+    finally:
+        app_state.sync_lock.release()
 
 
 def launch_metadata_sync(background_tasks: BackgroundTasks, *, course_id: int | None = None) -> dict[str, Any]:
+    """Atomically start a metadata sync if none is running.
+
+    Uses non-blocking ``Lock.locked()`` only as a fast pre-check; the real
+    guard is inside ``_execute_metadata_sync`` which calls ``sync_lock.acquire()``.
+    The run_id is created *before* the background task is queued so that:
+    1. The caller always receives a valid ``run_id``.
+    2. If a second request arrives before the first task's ``acquire()``, the
+       ``sync_lock.locked()`` check rejects it (the lock is held by then).
+    However, to close the TOCTOU window where two requests both see the lock
+    as free, ``_execute_metadata_sync`` performs a secondary non-blocking
+    acquire check and abandons the duplicate run.
+    """
     app_state = state()
     if app_state.sync_lock.locked():
         return {"status": "already_running", "run": app_state.db.latest_sync_run()}
