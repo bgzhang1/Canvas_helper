@@ -113,14 +113,25 @@ def test_init_drops_legacy_ai_artifacts(tmp_path) -> None:
             """,
             (now,),
         )
+        conn.execute(
+            """
+            INSERT INTO event_logs(created_at, category, action, status, title, metadata_json)
+            VALUES (?, 'ai', 'agent_chat_completed', 'success', 'Legacy agent chat', '{}')
+            """,
+            (now,),
+        )
         conn.execute("PRAGMA user_version = 2")
 
     db = Database(db_path)
     db.init()
 
     assert "analyses" not in table_names(db_path)
+    assert db.get_setting("agent.base_url") == "https://llm.example/v1"
     assert db.get_setting("ai.base_url") is None
-    assert db.list_events() == []
+    events = db.list_events()
+    assert len(events) == 1
+    assert events[0]["category"] == "agent"
+    assert events[0]["action"] == "agent_chat_completed"
 
 
 def test_init_marks_existing_version_zero_schema_as_current(tmp_path) -> None:

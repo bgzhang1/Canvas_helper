@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import runtime
-from .api import courses, events, files, health, settings as settings_api, sync
+from .api import agent, courses, events, files, health, settings as settings_api, sync
 from .config import get_settings
 
 # Re-exported so tests and tooling can reach runtime state via this module
@@ -47,7 +47,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for module in (health, courses, files, sync, settings_api, events):
+for module in (health, courses, files, sync, settings_api, agent, events):
     app.include_router(module.router)
 
 

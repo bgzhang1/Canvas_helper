@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     canvas_base_url: str = "https://cityu-dg.instructure.com/"
     canvas_api_token: str | None = Field(default=None, repr=False)
 
+    openai_compat_base_url: str | None = None
+    openai_compat_api_key: str | None = Field(default=None, repr=False)
+    openai_compat_model: str = "gpt-4.1-mini"
+
     data_dir: Path = Path("./data")
     sqlite_path: Path | None = None
 
@@ -21,6 +25,11 @@ class Settings(BaseSettings):
 
     canvas_timeout_seconds: float = 60.0
     canvas_download_timeout_seconds: float = 180.0
+
+    agent_shell_tools_enabled: bool = False
+    agent_request_timeout_seconds: float = 120.0
+    agent_tool_timeout_seconds: float = 60.0
+    agent_max_tool_rounds: int = 6
 
     notification_email_from: str = "canvas-material@localhost"
     notification_smtp_host: str | None = None

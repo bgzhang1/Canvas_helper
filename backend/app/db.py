@@ -235,8 +235,15 @@ class Database:
         conn.executescript(
             """
             DROP TABLE IF EXISTS analyses;
+            INSERT OR IGNORE INTO settings(key, value, updated_at)
+            SELECT 'agent.' || substr(key, 4), value, updated_at
+            FROM settings
+            WHERE key LIKE 'ai.%';
             DELETE FROM settings WHERE key LIKE 'ai.%';
-            DELETE FROM event_logs WHERE category = 'ai' OR action LIKE 'analysis_%' OR action LIKE 'agent_chat_%';
+            UPDATE event_logs
+            SET category = 'agent'
+            WHERE category = 'ai' AND action LIKE 'agent_%';
+            DELETE FROM event_logs WHERE category = 'ai' OR action LIKE 'analysis_%';
             """
         )
 

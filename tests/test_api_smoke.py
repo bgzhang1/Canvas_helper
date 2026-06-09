@@ -18,6 +18,8 @@ def client(tmp_path, monkeypatch):
         data_dir=tmp_path,
         sqlite_path=tmp_path / "canvas_material_test.db",
         canvas_api_token=None,
+        openai_compat_base_url=None,
+        openai_compat_api_key=None,
     )
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
@@ -221,6 +223,7 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
     settings = client.get("/api/settings").json()
     assert settings["sync"]["enabled"] is False
     assert settings["token_configured"] is False
+    assert "agent" in settings
     assert "ai" not in settings
 
     assert client.post("/api/settings/canvas/test", json={"api_token": ""}).json()["ok"] is False
@@ -229,6 +232,20 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
     assert client.put("/api/settings/sync", json={"enabled": False, "interval_minutes": 1}).status_code == 422
     assert client.put("/api/settings/sync", json={"enabled": False, "interval_minutes": 15}).json()["interval_minutes"] == 15
     assert client.put("/api/settings/ai", json={}).status_code in {404, 405}
+    assert client.get("/api/settings/agent/models").json()["ok"] is False
+    agent_response = client.put(
+        "/api/settings/agent",
+        json={
+            "base_url": "https://llm.example/v1",
+            "model": "gpt-test",
+            "reasoning_effort": "high",
+            "skills": "Prefer local Canvas cache.",
+        },
+    ).json()
+    assert agent_response["base_url"] == "https://llm.example/v1"
+    assert agent_response["model"] == "gpt-test"
+    assert agent_response["reasoning_effort"] == "high"
+    assert agent_response["configured"] is False
     assert client.put(
         "/api/settings/notifications",
         json={
@@ -243,8 +260,12 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
     assert client.get("/api/sync/status").json()["running"] is False
     assert client.post("/api/sync/cancel").json()["status"] == "idle"
     assert client.get("/api/analysis/status").status_code == 404
-    assert client.post("/api/agent/chat", json={"message": "status"}).status_code in {404, 405}
-    assert client.post("/api/agent/chat/stream", json={"message": "status"}).status_code in {404, 405}
+    chat = client.post("/api/agent/chat", json={"message": "status"})
+    assert chat.status_code == 200
+    assert chat.json()["status"] == "not_configured"
+    stream = client.post("/api/agent/chat/stream", json={"message": "status"})
+    assert stream.status_code == 200
+    assert "not_configured" in stream.text
 
 
 def test_background_sync_routes_complete_without_external_services(client: TestClient) -> None:

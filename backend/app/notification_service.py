@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from agent import AgentTool
 from .db import Database, utc_now
 
 
@@ -175,6 +176,56 @@ class NotificationService:
         if not sep:
             return "***"
         return (local[:2] + "***@" + domain) if len(local) > 2 else "***@" + domain
+
+
+def build_notification_agent_tools(service: NotificationService) -> list[AgentTool]:
+    tools: list[AgentTool] = []
+    if service.telegram_available():
+        tools.append(
+            AgentTool(
+                name="telegram_bot",
+                description="Send a concise notification through the Telegram bot configured in Settings.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Message text to send."},
+                        "disable_notification": {"type": "boolean", "default": False},
+                    },
+                    "required": ["text"],
+                },
+                handler=lambda args: service.send_telegram_message(
+                    str(args.get("text") or ""),
+                    disable_notification=bool(args.get("disable_notification", False)),
+                ),
+            )
+        )
+    if service.email_available():
+        tools.append(
+            AgentTool(
+                name="email_reminder",
+                description=(
+                    "Send or queue an email reminder to the email target configured in Settings. "
+                    "Use for high-confidence deadlines, urgent risks, or explicit reminder instructions."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "body": {"type": "string"},
+                        "due_at": {"type": "string", "description": "Optional ISO date/time related to the reminder."},
+                        "priority": {"type": "string", "enum": ["normal", "high", "urgent"], "default": "normal"},
+                    },
+                    "required": ["subject", "body"],
+                },
+                handler=lambda args: service.send_email_reminder(
+                    subject=str(args.get("subject") or ""),
+                    body=str(args.get("body") or ""),
+                    due_at=str(args.get("due_at")) if args.get("due_at") else None,
+                    priority=str(args.get("priority") or "normal"),
+                ),
+            )
+        )
+    return tools
 
 
 def _clean_message(value: str, *, limit: int) -> str:
