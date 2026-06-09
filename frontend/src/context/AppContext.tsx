@@ -10,7 +10,6 @@ export type AppContextValue = {
   lang: Lang;
   setLang: (lang: Lang) => void;
   t: TFunction;
-  canvasBaseUrl: string;
   error: string | null;
   setError: (value: string | null) => void;
   busy: string | null;

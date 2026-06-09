@@ -76,23 +76,10 @@ export type TimelineItem = {
   title: string;
   date: string;
   source: string;
-  confidence?: string;
-  confidence_reason?: string;
-};
-
-export type Analysis = {
-  summary?: string;
-  timeline?: TimelineItem[];
-  course_outline?: Array<{ title: string; evidence?: string }>;
-  risks?: string[];
-  confidence_notes?: string[];
-  model?: string;
-  generated_at?: string;
 };
 
 export type TimelineResponse = {
   structured: TimelineItem[];
-  analysis: Analysis | null;
   data_sources: Record<string, { count?: number; available?: boolean }>;
 };
 
@@ -138,19 +125,6 @@ export type SyncProgress = {
   status?: string;
 };
 
-export type AnalysisStatus = {
-  running: boolean;
-  status: string;
-  percent: number;
-  stage: string;
-  course_id?: number | null;
-  course?: string | null;
-  file?: string | null;
-  current?: number | null;
-  total?: number | null;
-  message?: string | null;
-};
-
 export type AppSettings = {
   canvas_base_url: string;
   token_configured: boolean;
@@ -162,14 +136,6 @@ export type AppSettings = {
     enabled: boolean;
     languages: string;
     max_pages: number;
-  };
-  ai: {
-    base_url: string;
-    configured: boolean;
-    api_key_configured: boolean;
-    model: string;
-    reasoning_effort: string;
-    skills: string;
   };
   notifications: {
     telegram_enabled: boolean;
@@ -187,19 +153,6 @@ export type CanvasTestResult = {
   message: string;
 };
 
-export type AIModelTestResult = {
-  ok: boolean;
-  message: string;
-  model_count: number;
-};
-
-export type AIModelList = {
-  ok: boolean;
-  models: string[];
-  message: string;
-  model: string;
-};
-
 export type EventLog = {
   id: number;
   created_at: string;
@@ -215,16 +168,7 @@ export type EventLog = {
   metadata: Record<string, unknown>;
 };
 
-export type AgentChatMessage = {
-  role: 'user' | 'assistant';
-  content: string;
-  tools_used?: string[];
-  status?: string;
-  thinking?: string;
-  steps?: { name: string; status: 'running' | 'ok' | 'error'; args?: Record<string, unknown> | null }[];
-};
-
 export type ActiveTab = 'timeline' | 'files' | 'announcements' | 'assignments' | 'people';
-export type View = 'dashboard' | 'agent' | 'course' | 'settings';
+export type View = 'dashboard' | 'course' | 'settings';
 export type EventLogFilter = 'all' | 'success' | 'failed' | 'warning';
 export type EventLogLevel = Exclude<EventLogFilter, 'all'> | 'running' | 'other';

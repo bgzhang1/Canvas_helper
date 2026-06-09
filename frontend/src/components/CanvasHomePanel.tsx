@@ -4,8 +4,8 @@ import { useAppContext } from '../context/AppContext';
 import { courseCode } from '../utils/course';
 
 export function CanvasHomePanel({ course, home, loading, onClose }: { course: Course; home: CourseHome | null; loading: boolean; onClose: () => void }) {
-  const { t, canvasBaseUrl } = useAppContext();
-  const srcDoc = `<!doctype html><html><head><base href="${canvasBaseUrl}" target="_blank"><style>
+  const { t } = useAppContext();
+  const srcDoc = `<!doctype html><html><head><base target="_blank"><style>
 body{font-family:Inter,Arial,sans-serif;line-height:1.55;color:#111;margin:0;padding:28px;background:#fff}
 a{color:#111;text-decoration:underline} img,video,iframe{max-width:100%;height:auto}
 table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #111;padding:6px}

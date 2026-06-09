@@ -22,11 +22,10 @@ def safe_path_segment(name: str) -> str:
 
 
 class BackupService:
-    def __init__(self, db: Database, canvas: CanvasReadOnlyClient, data_dir: Path, *, min_free_bytes: int = 0):
+    def __init__(self, db: Database, canvas: CanvasReadOnlyClient, data_dir: Path):
         self.db = db
         self.canvas = canvas
         self.data_dir = data_dir
-        self.min_free_bytes = min_free_bytes
         self._folder_cache: dict[int, dict[str, Any]] = {}
 
     async def backup_course_files(
@@ -105,13 +104,6 @@ class BackupService:
                     continue
 
                 self._archive_previous(row, destination)
-                if self.min_free_bytes:
-                    free = shutil.disk_usage(self.data_dir).free
-                    needed = self.min_free_bytes + int(expected_size or 0)
-                    if free < needed:
-                        raise RuntimeError(
-                            f"Insufficient disk space: {free} bytes free, need >= {needed}"
-                        )
                 with self.db.connect() as conn:
                     conn.execute(
                         """

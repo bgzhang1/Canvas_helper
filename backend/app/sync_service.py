@@ -33,7 +33,6 @@ class SyncService:
         self.backup = backup
         self.extractor = extractor
         self.is_cancelled = is_cancelled or (lambda: False)
-        self._course_label_cache: dict[int, str] = {}
 
     def _check_cancelled(self) -> None:
         if self.is_cancelled():
@@ -149,57 +148,40 @@ class SyncService:
                 self._check_cancelled()
                 course_id = int(course["id"])
                 course_name = course.get("name") or course.get("course_code") or f"course_{course_id}"
-                try:
-                    if self._upsert_course(course):
-                        counts["updated"] += 1
-                        course_outcome = "updated"
-                    else:
-                        counts["unchanged"] += 1
-                        course_outcome = "unchanged"
-                    counts["courses"] += 1
-                    self.db.add_event(
-                        category="sync",
-                        action="course_synced",
-                        status="success",
-                        title="Course shell synced",
-                        course_id=course_id,
-                        course_name=course_name,
-                        item_id=course_id,
-                        item_name=course_name,
-                        metadata={"outcome": course_outcome},
-                    )
-                    complete_step("Synced course shell", course_index, course_name)
+                if self._upsert_course(course):
+                    counts["updated"] += 1
+                    course_outcome = "updated"
+                else:
+                    counts["unchanged"] += 1
+                    course_outcome = "unchanged"
+                counts["courses"] += 1
+                self.db.add_event(
+                    category="sync",
+                    action="course_synced",
+                    status="success",
+                    title="Course shell synced",
+                    course_id=course_id,
+                    course_name=course_name,
+                    item_id=course_id,
+                    item_name=course_name,
+                    metadata={"outcome": course_outcome},
+                )
+                complete_step("Synced course shell", course_index, course_name)
 
-                    self._merge_sync_delta(counts, "announcements", await self._sync_announcements(course_id))
-                    complete_step("Synced announcements", course_index, course_name)
-                    self._merge_sync_delta(counts, "assignments", await self._sync_assignments(course_id))
-                    complete_step("Synced assignments", course_index, course_name)
-                    self._merge_sync_delta(counts, "calendar_events", await self._sync_calendar_events(course_id))
-                    complete_step("Synced calendar events", course_index, course_name)
-                    self._merge_sync_delta(counts, "pages", await self._sync_pages(course_id, course))
-                    complete_step("Synced pages", course_index, course_name)
-                    self._merge_sync_delta(counts, "people", await self._sync_people(course_id))
-                    if sync_files:
-                        self._merge_sync_delta(counts, "files", await self._sync_files(course_id))
-                        complete_step("Synced people and file index", course_index, course_name)
-                    else:
-                        complete_step("Synced people", course_index, course_name)
-                except (SyncCancelled, asyncio.CancelledError):
-                    raise
-                except Exception as exc:
-                    # Isolate one bad course so the rest of the run still completes.
-                    counts["failed"] += 1
-                    self.db.add_event(
-                        category="sync",
-                        action="course_sync_failed",
-                        status="failed",
-                        title="Course sync failed",
-                        course_id=course_id,
-                        course_name=course_name,
-                        message=f"{exc.__class__.__name__}: {exc}",
-                        metadata={"outcome": "failed"},
-                    )
-                    continue
+                self._merge_sync_delta(counts, "announcements", await self._sync_announcements(course_id))
+                complete_step("Synced announcements", course_index, course_name)
+                self._merge_sync_delta(counts, "assignments", await self._sync_assignments(course_id))
+                complete_step("Synced assignments", course_index, course_name)
+                self._merge_sync_delta(counts, "calendar_events", await self._sync_calendar_events(course_id))
+                complete_step("Synced calendar events", course_index, course_name)
+                self._merge_sync_delta(counts, "pages", await self._sync_pages(course_id, course))
+                complete_step("Synced pages", course_index, course_name)
+                self._merge_sync_delta(counts, "people", await self._sync_people(course_id))
+                if sync_files:
+                    self._merge_sync_delta(counts, "files", await self._sync_files(course_id))
+                    complete_step("Synced people and file index", course_index, course_name)
+                else:
+                    complete_step("Synced people", course_index, course_name)
 
             if download_files:
                 report_progress(
@@ -407,7 +389,7 @@ class SyncService:
     async def _sync_announcements(self, course_id: int) -> dict[str, int]:
         course_name = self._course_label(course_id)
         end_date = (datetime.now(timezone.utc) + timedelta(days=3650)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        items, fetched_ok = await self._optional_paginate(
+        items = await self._optional_paginate(
             "/api/v1/announcements",
             params={
                 "context_codes[]": [f"course_{course_id}"],
@@ -424,8 +406,6 @@ class SyncService:
         events: list[dict[str, Any]] = []
         with self.db.connect() as conn:
             for item in items:
-                title = item.get("title") or "Untitled announcement"
-                message = item.get("message")
                 raw_json = self._canonical_raw_json(item)
                 if self._raw_json_is_unchanged(conn, "SELECT raw_json FROM announcements WHERE id = ?", (item["id"],), raw_json):
                     unchanged += 1
@@ -438,7 +418,7 @@ class SyncService:
                             "course_id": course_id,
                             "course_name": course_name,
                             "item_id": item["id"],
-                            "item_name": title,
+                            "item_name": item.get("title") or "Untitled announcement",
                             "metadata": {"outcome": "unchanged", "posted_at": item.get("posted_at")},
                         }
                     )
@@ -458,23 +438,13 @@ class SyncService:
                     (
                         item["id"],
                         course_id,
-                        title,
-                        message,
+                        item.get("title") or "Untitled announcement",
+                        item.get("message"),
                         item.get("posted_at"),
                         item.get("user_name"),
                         raw_json,
                         now,
                     ),
-                )
-                self.db.upsert_search_document(
-                    conn,
-                    source="announcement",
-                    source_id=item["id"],
-                    course_id=course_id,
-                    title=title,
-                    body=message or "",
-                    metadata={"posted_at": item.get("posted_at"), "author_name": item.get("user_name")},
-                    updated_at=item.get("posted_at"),
                 )
                 updated += 1
                 events.append(
@@ -486,27 +456,17 @@ class SyncService:
                         "course_id": course_id,
                         "course_name": course_name,
                         "item_id": item["id"],
-                        "item_name": title,
+                        "item_name": item.get("title") or "Untitled announcement",
                         "metadata": {"outcome": "updated", "posted_at": item.get("posted_at")},
                     }
                 )
-        with self.db.connect() as conn:
-            for event in events:
-                self.db.add_event(**event, conn=conn)
-            if fetched_ok:
-                self._prune_missing(
-                    conn,
-                    table="announcements",
-                    id_col="id",
-                    course_id=course_id,
-                    seen=[item["id"] for item in items],
-                    search_source="announcement",
-                )
+        for event in events:
+            self.db.add_event(**event)
         return {"seen": len(items), "updated": updated, "unchanged": unchanged}
 
     async def _sync_assignments(self, course_id: int) -> dict[str, int]:
         course_name = self._course_label(course_id)
-        direct_items, direct_ok = await self._optional_paginate(
+        direct_items = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/assignments",
             params={
                 "per_page": "100",
@@ -515,7 +475,7 @@ class SyncService:
                 "override_assignment_dates": "true",
             },
         )
-        assignment_groups, groups_ok = await self._optional_paginate(
+        assignment_groups = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/assignment_groups",
             params={
                 "per_page": "100",
@@ -542,7 +502,6 @@ class SyncService:
         events: list[dict[str, Any]] = []
         with self.db.connect() as conn:
             for item in items:
-                name = item.get("name") or "Untitled assignment"
                 raw_json = self._canonical_raw_json(item)
                 if self._raw_json_is_unchanged(conn, "SELECT raw_json FROM assignments WHERE id = ?", (item["id"],), raw_json):
                     unchanged += 1
@@ -555,7 +514,7 @@ class SyncService:
                             "course_id": course_id,
                             "course_name": course_name,
                             "item_id": item["id"],
-                            "item_name": name,
+                            "item_name": item.get("name") or "Untitled assignment",
                             "metadata": {"outcome": "unchanged", "due_at": item.get("due_at")},
                         }
                     )
@@ -577,7 +536,7 @@ class SyncService:
                     (
                         item["id"],
                         course_id,
-                        name,
+                        item.get("name") or "Untitled assignment",
                         item.get("due_at"),
                         item.get("unlock_at"),
                         item.get("lock_at"),
@@ -586,30 +545,6 @@ class SyncService:
                         raw_json,
                         now,
                     ),
-                )
-                self.db.upsert_search_document(
-                    conn,
-                    source="assignment",
-                    source_id=item["id"],
-                    course_id=course_id,
-                    title=name,
-                    body=self.db.assignment_search_body(
-                        {
-                            "name": name,
-                            "due_at": item.get("due_at"),
-                            "unlock_at": item.get("unlock_at"),
-                            "lock_at": item.get("lock_at"),
-                            "points_possible": item.get("points_possible"),
-                            "raw_json": raw_json,
-                        }
-                    ),
-                    metadata={
-                        "due_at": item.get("due_at"),
-                        "unlock_at": item.get("unlock_at"),
-                        "lock_at": item.get("lock_at"),
-                        "points_possible": item.get("points_possible"),
-                    },
-                    updated_at=item.get("due_at") or item.get("unlock_at") or item.get("lock_at"),
                 )
                 updated += 1
                 events.append(
@@ -621,26 +556,16 @@ class SyncService:
                         "course_id": course_id,
                         "course_name": course_name,
                         "item_id": item["id"],
-                        "item_name": name,
+                        "item_name": item.get("name") or "Untitled assignment",
                         "metadata": {"outcome": "updated", "due_at": item.get("due_at")},
                     }
                 )
-        with self.db.connect() as conn:
-            for event in events:
-                self.db.add_event(**event, conn=conn)
-            if direct_ok:
-                self._prune_missing(
-                    conn,
-                    table="assignments",
-                    id_col="id",
-                    course_id=course_id,
-                    seen=[item["id"] for item in items],
-                    search_source="assignment",
-                )
+        for event in events:
+            self.db.add_event(**event)
         return {"seen": len(items), "updated": updated, "unchanged": unchanged}
 
     async def _sync_calendar_events(self, course_id: int) -> dict[str, int]:
-        items, fetched_ok = await self._optional_paginate(
+        items = await self._optional_paginate(
             "/api/v1/calendar_events",
             params={"context_codes[]": [f"course_{course_id}"], "per_page": "100", "all_events": "true"},
         )
@@ -677,18 +602,10 @@ class SyncService:
                     ),
                 )
                 updated += 1
-            if fetched_ok:
-                self._prune_missing(
-                    conn,
-                    table="calendar_events",
-                    id_col="id",
-                    course_id=course_id,
-                    seen=[item["id"] for item in items],
-                )
         return {"seen": len(items), "updated": updated, "unchanged": unchanged}
 
     async def _sync_pages(self, course_id: int, course: dict | None = None) -> dict[str, int]:
-        pages, fetched_ok = await self._optional_paginate(
+        pages = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/pages",
             params={"per_page": "100"},
         )
@@ -721,15 +638,11 @@ class SyncService:
         unchanged = 0
         with self.db.connect() as conn:
             for page, detail, page_url in details:
-                resolved_page_url = page_url or str(page.get("page_id") or page.get("id"))
-                title = detail.get("title") or page.get("title") or "Untitled page"
-                body = detail.get("body")
-                updated_at = detail.get("updated_at") or page.get("updated_at")
                 raw_json = self._canonical_raw_json(detail)
                 if self._raw_json_is_unchanged(
                     conn,
                     "SELECT raw_json FROM pages WHERE course_id = ? AND page_url = ?",
-                    (course_id, resolved_page_url),
+                    (course_id, page_url or str(page.get("page_id") or page.get("id"))),
                     raw_json,
                 ):
                     unchanged += 1
@@ -749,41 +662,21 @@ class SyncService:
                     """,
                     (
                         course_id,
-                        resolved_page_url,
+                        page_url or str(page.get("page_id") or page.get("id")),
                         detail.get("page_id") or page.get("page_id"),
-                        title,
-                        body,
-                        updated_at,
+                        detail.get("title") or page.get("title") or "Untitled page",
+                        detail.get("body"),
+                        detail.get("updated_at") or page.get("updated_at"),
                         1 if detail.get("published", page.get("published")) else 0,
                         raw_json,
                         now,
                     ),
                 )
-                self.db.upsert_search_document(
-                    conn,
-                    source="page",
-                    source_id=f"{course_id}:{resolved_page_url}",
-                    course_id=course_id,
-                    title=title,
-                    body=body or "",
-                    metadata={"page_url": resolved_page_url, "updated_at": updated_at},
-                    updated_at=updated_at,
-                )
                 updated += 1
-            if fetched_ok:
-                self._prune_missing(
-                    conn,
-                    table="pages",
-                    id_col="page_url",
-                    course_id=course_id,
-                    seen=[entry[2] for entry in details],
-                    search_source="page",
-                    search_id=lambda value: f"{course_id}:{value}",
-                )
         return {"seen": len(details), "updated": updated, "unchanged": unchanged}
 
     async def _sync_people(self, course_id: int) -> dict[str, int]:
-        items, fetched_ok = await self._optional_paginate(
+        items = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/users",
             params={
                 # No enrollment_state filter: once a term concludes every
@@ -843,21 +736,11 @@ class SyncService:
                     ),
                 )
                 updated += 1
-            if fetched_ok:
-                self._prune_missing(
-                    conn,
-                    table="course_people",
-                    id_col="user_id",
-                    course_id=course_id,
-                    seen=[item["id"] for item in items],
-                )
         return {"seen": len(items), "updated": updated, "unchanged": unchanged}
 
     async def _sync_files(self, course_id: int) -> dict[str, int]:
         course_name = self._course_label(course_id)
-        # Files are intentionally not pruned: the local backup on disk would be
-        # orphaned. Removed-on-Canvas files simply stop updating.
-        files, _files_ok = await self._optional_paginate(
+        files = await self._optional_paginate(
             f"/api/v1/courses/{course_id}/files",
             params={"per_page": "100", "include[]": ["usage_rights"]},
         )
@@ -923,22 +806,6 @@ class SyncService:
                         now,
                     ),
                 )
-                # Index name/aliases only; preserve any existing extracted-text body.
-                # Extraction re-indexes the real text, so avoid re-reading the file here.
-                self.db.upsert_search_document(
-                    conn,
-                    source="file",
-                    source_id=item["id"],
-                    course_id=course_id,
-                    title=display_name,
-                    body="",
-                    metadata={
-                        "content_type": item.get("content-type") or item.get("content_type"),
-                        "updated_at": item.get("updated_at"),
-                    },
-                    updated_at=item.get("updated_at"),
-                    preserve_existing_body=True,
-                )
                 updated += 1
                 events.append(
                     {
@@ -953,23 +820,19 @@ class SyncService:
                         "metadata": {"outcome": "updated", "updated_at": item.get("updated_at")},
                     }
                 )
-        with self.db.connect() as conn:
-            for event in events:
-                self.db.add_event(**event, conn=conn)
+        for event in events:
+            self.db.add_event(**event)
         return {"seen": len(files), "updated": updated, "unchanged": unchanged}
 
     def _course_label(self, course_id: int) -> str:
-        cached = self._course_label_cache.get(course_id)
-        if cached is not None:
-            return cached
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT name, course_code FROM courses WHERE id = ?",
                 (course_id,),
             ).fetchone()
-        label = (row["course_code"] or row["name"] or f"course_{course_id}") if row else f"course_{course_id}"
-        self._course_label_cache[course_id] = label
-        return label
+        if not row:
+            return f"course_{course_id}"
+        return row["course_code"] or row["name"] or f"course_{course_id}"
 
     def _redact_file_metadata(self, item: dict) -> dict:
         redacted = dict(item)
@@ -990,45 +853,10 @@ class SyncService:
             return False
         return True
 
-    async def _optional_paginate(self, path: str, params: dict) -> tuple[list, bool]:
-        """Return (items, fetched_ok). ``fetched_ok`` is False when access was denied
-        (401/403/404) so callers never prune local data on a non-authoritative empty result."""
+    async def _optional_paginate(self, path: str, params: dict) -> list:
         try:
-            return await self.canvas.paginate(path, params=params), True
+            return await self.canvas.paginate(path, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {401, 403, 404}:
-                return [], False
+                return []
             raise
-
-    def _prune_missing(
-        self,
-        conn,
-        *,
-        table: str,
-        id_col: str,
-        course_id: int,
-        seen: list,
-        search_source: str | None = None,
-        search_id: Callable[[Any], Any] | None = None,
-    ) -> int:
-        """Delete local rows for a course whose ids were absent from a successful fetch."""
-        seen_set = {str(value) for value in seen}
-        existing = [row[id_col] for row in conn.execute(
-            f"SELECT {id_col} FROM {table} WHERE course_id = ?", (course_id,)
-        ).fetchall()]
-        missing = [value for value in existing if str(value) not in seen_set]
-        if not missing:
-            return 0
-        placeholders = ",".join("?" for _ in missing)
-        conn.execute(
-            f"DELETE FROM {table} WHERE course_id = ? AND {id_col} IN ({placeholders})",
-            [course_id, *missing],
-        )
-        if search_source:
-            for value in missing:
-                self.db.delete_search_document(
-                    conn,
-                    source=search_source,
-                    source_id=search_id(value) if search_id else value,
-                )
-        return len(missing)

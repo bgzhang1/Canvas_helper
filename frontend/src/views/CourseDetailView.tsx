@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bell, CalendarDays, ChevronDown, ChevronUp, ClipboardList, FileText, RefreshCcw, Sparkles, Users } from 'lucide-react';
+import { Bell, CalendarDays, ChevronDown, ChevronUp, ClipboardList, FileText, RefreshCcw, Users } from 'lucide-react';
 import type { ActiveTab, Course, CourseDetail } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { Badge, EmptyState } from '../components/ui';
@@ -19,10 +19,7 @@ export function CourseDetailView({
   loading,
   refreshCourse,
   onSyncCourse,
-  syncActive,
-  onAnalyzeCourse,
-  analysisActive,
-  analysisCourseId
+  syncActive
 }: {
   course: Course;
   detail: CourseDetail | null;
@@ -32,13 +29,9 @@ export function CourseDetailView({
   refreshCourse: () => Promise<void>;
   onSyncCourse: (course: Course) => Promise<void>;
   syncActive: boolean;
-  onAnalyzeCourse: (course: Course) => Promise<void>;
-  analysisActive: boolean;
-  analysisCourseId: number | null;
 }) {
-  const { busy, t } = useAppContext();
+  const { t } = useAppContext();
   const [isHomeExpanded, setIsHomeExpanded] = useState(false);
-  const analyzingThisCourse = analysisActive && analysisCourseId === course.id;
 
   return (
     <div className="course-detail-root max-w-5xl mx-auto w-full relative">
@@ -61,14 +54,6 @@ export function CourseDetailView({
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => onAnalyzeCourse(course)}
-                disabled={busy === 'analysis' || analysisActive || loading}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-bold tracking-widest uppercase border border-black bg-black text-[#F4F4F0] hover:bg-[#F4F4F0] hover:text-black disabled:bg-[#E8E8E3] disabled:text-gray-500 disabled:cursor-wait"
-              >
-                {busy === 'analysis' || analyzingThisCourse ? <RefreshCcw size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                {analyzingThisCourse ? t('analyzing') : t('analyze')}
-              </button>
               <button
                 onClick={() => setIsHomeExpanded(!isHomeExpanded)}
                 className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-bold tracking-widest uppercase border border-black transition-none bg-[#F4F4F0] text-black hover:bg-black hover:text-[#F4F4F0]"
@@ -111,7 +96,7 @@ export function CourseDetailView({
         {loading && <EmptyState>{t('loadingCourseMaterial')}</EmptyState>}
         {!loading && !detail && <EmptyState>{t('noDetailLoaded')}</EmptyState>}
         {!loading && detail && activeTab === 'timeline' && (
-          <TimelineTab detail={detail} analyzing={analyzingThisCourse} />
+          <TimelineTab detail={detail} />
         )}
         {!loading && detail && activeTab === 'files' && (
           <FilesTab course={course} files={detail.files} refreshCourse={refreshCourse} />

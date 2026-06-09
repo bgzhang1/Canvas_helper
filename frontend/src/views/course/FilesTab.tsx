@@ -1,38 +1,38 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckSquare, ChevronRight, Database, Download, Eye, FileText, Folder, Network, RefreshCcw, Square, X } from 'lucide-react';
+import { CheckSquare, ChevronDown, ChevronUp, Database, Download, Eye, FileText, Folder, Network, RefreshCcw, Square, X } from 'lucide-react';
 import type { Course, MaterialFile } from '../../types';
 import { useAppContext } from '../../context/AppContext';
 import { backupFile, backupSelectedFiles, downloadSelectedFiles, extractFile, syncCourseFiles } from '../../api/files';
 import { Badge, EmptyState } from '../../components/ui';
 import { fmtBytes, fmtShortDate } from '../../utils/format';
 
-function segmentsOf(folderPath: string | null | undefined): string[] {
-  return (folderPath ?? '')
+function groupFiles(files: MaterialFile[], courseId: number) {
+  const groups = new Map<string, MaterialFile[]>();
+  for (const file of files) {
+    let folder = normalizeFolderPath(file.folder_path);
+    if ((!folder || folder === '/') && file.local_path) {
+      const parts = file.local_path.split(/[\\/]+/);
+      const marker = parts.findIndex((part) => part === `course_${courseId}`);
+      if (marker >= 0 && marker < parts.length - 2) {
+        folder = normalizeFolderPath(parts.slice(marker + 1, parts.length - 1).join('/'));
+      } else {
+        folder = '/';
+      }
+    }
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder)!.push(file);
+  }
+  return Array.from(groups.entries()).map(([name, groupedFiles]) => ({ name, files: groupedFiles }));
+}
+
+function normalizeFolderPath(value: string | null | undefined) {
+  const parts = (value ?? '')
     .replace(/\\/g, '/')
     .split('/')
     .map((part) => part.trim())
     .filter(Boolean);
-}
-
-function buildDirectory(files: MaterialFile[], current: string[]) {
-  const folders = new Map<string, number>();
-  const filesHere: MaterialFile[] = [];
-  for (const file of files) {
-    const segs = segmentsOf(file.folder_path);
-    if (!current.every((part, index) => segs[index] === part)) continue;
-    if (segs.length === current.length) filesHere.push(file);
-    else {
-      const name = segs[current.length];
-      folders.set(name, (folders.get(name) ?? 0) + 1);
-    }
-  }
-  return {
-    folders: Array.from(folders.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => a.name.localeCompare(b.name)),
-    filesHere
-  };
+  return parts.length > 0 ? `/${parts.join('/')}` : '/';
 }
 
 export function FilesTab({
@@ -47,16 +47,13 @@ export function FilesTab({
   const { query, busy, setBusy, setError, t } = useAppContext();
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [previewFile, setPreviewFile] = useState<MaterialFile | null>(null);
-  const [currentPath, setCurrentPath] = useState<string[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const needle = query.trim().toLowerCase();
   const visibleFiles = useMemo(
     () => (needle ? files.filter((file) => `${file.display_name} ${file.content_type ?? ''}`.toLowerCase().includes(needle)) : files),
     [files, needle]
   );
-  const directory = useMemo(
-    () => (needle ? { folders: [], filesHere: visibleFiles } : buildDirectory(visibleFiles, currentPath)),
-    [visibleFiles, currentPath, needle]
-  );
+  const groupedFolders = useMemo(() => groupFiles(visibleFiles, course.id), [visibleFiles, course.id]);
   const selectedIds = useMemo(() => Array.from(selectedFiles), [selectedFiles]);
 
   function toggleFile(id: number) {
@@ -64,6 +61,15 @@ export function FilesTab({
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleFolder(name: string) {
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
       return next;
     });
   }
@@ -83,22 +89,8 @@ export function FilesTab({
   return (
     <div className="space-y-6">
       <div className="files-toolbar flex justify-between items-center bg-[#E8E8E3] border border-black p-4 gap-4">
-        <span className="files-mount flex items-center gap-2 text-xs font-mono text-gray-600 uppercase font-bold tracking-widest flex-wrap">
-          <Database size={14} /> {t('mount')}:
-          <button onClick={() => setCurrentPath([])} className="hover:text-black hover:underline underline-offset-4">
-            ./data/canvas/course_{course.id}/
-          </button>
-          {currentPath.map((segment, index) => (
-            <Fragment key={index}>
-              <span className="text-gray-400">/</span>
-              <button
-                onClick={() => setCurrentPath(currentPath.slice(0, index + 1))}
-                className="hover:text-black hover:underline underline-offset-4 truncate max-w-[12rem]"
-              >
-                {segment}
-              </button>
-            </Fragment>
-          ))}
+        <span className="files-mount flex items-center gap-2 text-xs font-mono text-gray-600 uppercase font-bold tracking-widest">
+          <Database size={14} /> {t('mount')}: ./data/canvas/course_{course.id}/
         </span>
 
         <div className="files-actions flex items-center gap-2">
@@ -156,41 +148,46 @@ export function FilesTab({
                 <th className="p-4 w-12 border-r border-black text-center">{t('sel')}</th>
                 <th className="p-4 font-bold">{t('filename')}</th>
                 <th className="p-4 font-bold">{t('state')}</th>
-                <th className="p-4 font-bold">{t('analysis')}</th>
+                <th className="p-4 font-bold">{t('extraction')}</th>
                 <th className="p-4 font-bold text-right">{t('action')}</th>
               </tr>
             </thead>
             <tbody className="text-sm font-medium">
-              {directory.folders.map((folder) => (
-                <tr key={`dir:${folder.name}`} className="border-b border-black bg-[#E8E8E3] hover:bg-[#DEDED9]">
-                  <td colSpan={5} className="p-3 px-4 text-xs font-mono font-bold tracking-widest">
-                    <button
-                      onClick={() => setCurrentPath([...currentPath, folder.name])}
-                      className="w-full flex items-center justify-between gap-3 text-left uppercase"
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
+              {groupedFolders.map((folder) => {
+                const expanded = expandedFolders.has(folder.name);
+                return (
+                <Fragment key={folder.name}>
+                  <tr className="border-b border-black bg-[#E8E8E3]">
+                    <td colSpan={5} className="p-3 px-4 text-xs font-mono font-bold tracking-widest">
+                      <button
+                        onClick={() => toggleFolder(folder.name)}
+                        className="w-full flex items-center justify-between gap-3 text-left uppercase hover:underline underline-offset-4"
+                        aria-expanded={expanded}
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                         <Folder size={14} />
-                        <span className="truncate">{folder.name}</span>
-                      </span>
-                      <span className="shrink-0 text-gray-500 flex items-center gap-1">
-                        {folder.count} {t('filesUnit')} <ChevronRight size={14} />
-                      </span>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {directory.filesHere.map((file) => (
-                <FileRow
-                  key={file.id}
-                  course={course}
-                  file={file}
-                  selected={selectedFiles.has(file.id)}
-                  onToggle={() => toggleFile(file.id)}
-                  onPreview={() => setPreviewFile(file)}
-                  runFileAction={runFileAction}
-                  refreshCourse={refreshCourse}
-                />
-              ))}
+                          <span className="truncate">{folder.name}</span>
+                        </span>
+                        <span className="shrink-0 text-gray-500">{folder.files.length} {t('filesUnit')}</span>
+                      </button>
+                    </td>
+                  </tr>
+                  {expanded && folder.files.map((file) => (
+                    <FileRow
+                      key={file.id}
+                      course={course}
+                      file={file}
+                      selected={selectedFiles.has(file.id)}
+                      onToggle={() => toggleFile(file.id)}
+                      onPreview={() => setPreviewFile(file)}
+                      runFileAction={runFileAction}
+                      refreshCourse={refreshCourse}
+                    />
+                  ))}
+                </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -1,17 +1,36 @@
 from __future__ import annotations
 
-import logging
-import shutil
+import json
 import sqlite3
-from typing import Callable
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable
 
-from .utils import utc_now
 
-logger = logging.getLogger("canvas_helper.db")
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-class MigrationsMixin:
-    """Schema version management and forward migrations for ``Database``."""
+class Database:
+    CURRENT_SCHEMA_VERSION = 3
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def connect(self):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def init(self) -> None:
         with self.connect() as conn:
@@ -25,30 +44,12 @@ class MigrationsMixin:
                 f"Database schema version {current_version} is newer than "
                 f"this app supports ({self.CURRENT_SCHEMA_VERSION})."
             )
-        if 0 < current_version < self.CURRENT_SCHEMA_VERSION:
-            self._backup_before_migration(current_version)
 
         for target_version, migration in self._migrations():
             if current_version < target_version:
                 migration(conn)
                 conn.execute(f"PRAGMA user_version = {target_version}")
                 current_version = target_version
-        if current_version >= 3 and self._create_search_index_schema(conn):
-            self._rebuild_search_index(conn)
-
-    def _backup_before_migration(self, from_version: int) -> None:
-        """Copy the existing populated DB file before upgrading its schema (4.9)."""
-        if not self.path.exists() or self.path.stat().st_size == 0:
-            return
-        backup_dir = self.path.parent / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = utc_now().replace(":", "").replace("-", "").replace(".", "")
-        backup_path = backup_dir / f"{self.path.stem}.v{from_version}.{stamp}.bak"
-        try:
-            shutil.copy2(self.path, backup_path)
-            logger.info("Backed up database to %s before migrating from v%s", backup_path, from_version)
-        except OSError as exc:
-            logger.warning("Could not back up database before migration: %s", exc)
 
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         row = conn.execute("PRAGMA user_version").fetchone()
@@ -58,8 +59,7 @@ class MigrationsMixin:
         return (
             (1, self._create_initial_schema),
             (2, self._create_performance_indexes),
-            (3, self._create_search_index),
-            (4, self._rebuild_search_index),
+            (3, self._drop_ai_analysis_artifacts),
         )
 
     def _create_initial_schema(self, conn: sqlite3.Connection) -> None:
@@ -172,16 +172,6 @@ class MigrationsMixin:
                 FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS analyses (
-                course_id INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                model TEXT,
-                generated_at TEXT NOT NULL,
-                PRIMARY KEY(course_id, kind),
-                FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -241,6 +231,15 @@ class MigrationsMixin:
             """
         )
 
+    def _drop_ai_analysis_artifacts(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS analyses;
+            DELETE FROM settings WHERE key LIKE 'ai.%';
+            DELETE FROM event_logs WHERE category = 'ai' OR action LIKE 'analysis_%' OR action LIKE 'agent_chat_%';
+            """
+        )
+
     def _ensure_defaults(self, conn: sqlite3.Connection) -> None:
         self.set_default(conn, "sync.enabled", "false")
         self.set_default(conn, "sync.interval_minutes", "60")
@@ -253,3 +252,173 @@ class MigrationsMixin:
             """,
             (key, value, utc_now()),
         )
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else default
+
+    def put_settings(self, values: dict[str, str]) -> None:
+        now = utc_now()
+        with self.connect() as conn:
+            for key, value in values.items():
+                conn.execute(
+                    """
+                    INSERT INTO settings(key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+
+    def start_sync_run(self) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO sync_runs(started_at, status, counts_json)
+                VALUES (?, 'running', '{}')
+                """,
+                (utc_now(),),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_sync_run(
+        self,
+        run_id: int,
+        status: str,
+        message: str | None = None,
+        counts: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sync_runs
+                SET finished_at = ?, status = ?, message = ?, counts_json = ?
+                WHERE id = ?
+                """,
+                (utc_now(), status, message, json.dumps(counts or {}), run_id),
+            )
+
+    def update_sync_run_counts(
+        self,
+        run_id: int,
+        counts: dict[str, Any],
+        message: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sync_runs
+                SET counts_json = ?, message = COALESCE(?, message)
+                WHERE id = ? AND status = 'running'
+                """,
+                (json.dumps(counts, ensure_ascii=False), message, run_id),
+            )
+
+    def latest_sync_run(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return row_to_dict(row) if row else None
+
+    def mark_stale_sync_runs_interrupted(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sync_runs
+                SET finished_at = ?, status = 'interrupted', message = 'Server restarted before this sync finished.'
+                WHERE status = 'running' AND finished_at IS NULL
+                """,
+                (utc_now(),),
+            )
+
+    def add_event(
+        self,
+        *,
+        category: str,
+        action: str,
+        status: str,
+        title: str,
+        course_id: int | None = None,
+        course_name: str | None = None,
+        item_id: str | int | None = None,
+        item_name: str | None = None,
+        message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO event_logs(
+                    created_at, category, action, status, title,
+                    course_id, course_name, item_id, item_name, message, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    utc_now(),
+                    category,
+                    action,
+                    status,
+                    title,
+                    course_id,
+                    course_name,
+                    str(item_id) if item_id is not None else None,
+                    item_name,
+                    message,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                DELETE FROM event_logs
+                WHERE id NOT IN (
+                    SELECT id FROM event_logs ORDER BY id DESC LIMIT 2000
+                )
+                """
+            )
+
+    def list_events(self, limit: int = 200, *, category: str | None = None) -> list[dict[str, Any]]:
+        capped_limit = max(1, min(limit, 500))
+        with self.connect() as conn:
+            if category:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM event_logs
+                    WHERE category = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (category, capped_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM event_logs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (capped_limit,),
+                ).fetchall()
+        items = rows_to_dicts(rows)
+        for item in items:
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                item["metadata"] = {}
+        return items
+
+
+def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [row_to_dict(row) for row in rows if row is not None]

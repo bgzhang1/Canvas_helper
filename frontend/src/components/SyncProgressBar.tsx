@@ -2,23 +2,16 @@ import type { SyncProgress } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { syncStageLabel } from '../utils/labels';
 
-export function SyncProgressBar({ progress, active, kind = 'sync' }: { progress: SyncProgress; active: boolean; kind?: 'sync' | 'analysis' }) {
+export function SyncProgressBar({ progress, active }: { progress: SyncProgress; active: boolean }) {
   const { t } = useAppContext();
   const percent = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
-  const prefix =
-    kind === 'analysis'
-      ? active
-        ? t('analysisRunning')
-        : progress.status === 'failed'
-          ? t('analysisFailed')
-          : t('analysisCompleted')
-      : active
-        ? t('syncRunning')
-        : progress.status === 'failed'
-          ? t('syncFailed')
-          : progress.status === 'cancelled'
-            ? t('syncCancelled')
-            : t('syncStatus');
+  const prefix = active
+    ? t('syncRunning')
+    : progress.status === 'failed'
+      ? t('syncFailed')
+      : progress.status === 'cancelled'
+        ? t('syncCancelled')
+        : t('syncStatus');
 
   return (
     <div className="border border-black bg-[#F4F4F0] px-4 py-3">

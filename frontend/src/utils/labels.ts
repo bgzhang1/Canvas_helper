@@ -32,14 +32,6 @@ export function syncStageLabel(stage: string | null | undefined, t: TFunction) {
   if (stage === 'Sync interrupted') return t('stageSyncInterrupted');
   if (stage === 'Interrupt requested') return t('stageInterruptRequested');
   if (/^Fetched \d+ courses$/.test(stage)) return `${t('stageFetchedCourses')} ${stage.match(/\d+/)?.[0] ?? ''}`.trim();
-  if (stage === 'Preparing AI analysis') return t('stagePreparingAnalysis');
-  if (stage === 'Collecting cached course data') return t('stageCollectingCache');
-  if (stage === 'Reading extracted files') return t('stageReadingFiles');
-  if (stage === 'Waiting for AI model') return t('stageWaitingModel');
-  if (stage === 'Running local analysis') return t('stageRunningLocalAnalysis');
-  if (stage === 'Saving AI analysis') return t('stageSavingAnalysis');
-  if (stage === 'AI analysis completed') return t('stageAnalysisCompleted');
-  if (stage === 'AI analysis failed') return t('stageAnalysisFailed');
   return stage;
 }
 
@@ -80,7 +72,6 @@ export function eventCategoryLabel(category: string, t: TFunction) {
   const normalized = category.toLowerCase();
   if (normalized === 'sync') return t('logCategorySync');
   if (normalized === 'file') return t('logCategoryFile');
-  if (normalized === 'ai') return t('logCategoryAi');
   if (normalized === 'announcement') return t('logCategoryAnnouncement');
   if (normalized === 'assignment') return t('logCategoryAssignment');
   return category;
@@ -103,15 +94,7 @@ export function eventActionLabel(action: string, t: TFunction) {
     file_sync_failed: 'actionFileSyncFailed',
     file_backup_started: 'actionFileBackupStarted',
     file_backup_completed: 'actionFileBackupCompleted',
-    file_backup_failed: 'actionFileBackupFailed',
-    analysis_started: 'actionAnalysisStarted',
-    analysis_completed: 'actionAnalysisCompleted',
-    analysis_failed: 'actionAnalysisFailed',
-    agent_chat_started: 'actionAgentChatStarted',
-    agent_chat_completed: 'actionAgentChatCompleted',
-    agent_chat_failed: 'actionAgentChatFailed',
-    agent_chat_not_configured: 'actionAgentChatNotConfigured',
-    agent_tool_call: 'actionAgentToolCall'
+    file_backup_failed: 'actionFileBackupFailed'
   };
   return labels[action] ? t(labels[action]) : action;
 }

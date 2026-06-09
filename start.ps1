@@ -131,7 +131,7 @@ foreach ($port in @(8000, 5173)) {
     }
 }
 
-Write-Step "Starting Canvas_helper"
+Write-Step "Starting Canvas Material Manager"
 Write-Host "Frontend: http://127.0.0.1:5173"
 Write-Host "Backend:  http://127.0.0.1:8000/api/health"
 Write-Host "Press Ctrl+C in this window to stop."

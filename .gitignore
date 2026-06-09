@@ -12,6 +12,9 @@ data/
 *.sqlite3
 *.log
 *.pid
+.backend.pid
+.frontend.pid
+.server.pid
 
 dist/
 frontend/dist/
@@ -23,10 +26,3 @@ backend/.mypy_cache/
 test-artifacts/
 
 .DS_Store
-
-# Exclude tests and scheduled task scripts
-tests/
-scripts/
-pytest.ini
-requirements-dev.txt
-

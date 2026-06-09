@@ -1,1 +1,1 @@
-"""FastAPI routers for the Canvas_helper API."""
+"""FastAPI routers for the Canvas Material Manager API."""

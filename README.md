@@ -1,33 +1,25 @@
-# Canvas_helper
+# Canvas Helper
 
-> 本地优先的 Canvas 课程资料同步、备份、检索与 AI 分析助手——只读访问 Canvas，凭据只保留在本机。
+Local-first Canvas course material manager. The backend syncs Canvas data through a read-only client, stores it in SQLite, downloads course files on demand, extracts searchable text, and serves a React frontend for browsing courses, timelines, files, announcements, assignments, people, settings, and logs.
 
-Canvas_helper 是一个本地 Canvas 课程资料助手，用来同步课程、公告、作业、页面、成员和文件索引，并把课件安全地备份到本机。它提供 React 前端、FastAPI 后端、SQLite 本地缓存、文件文本抽取/OCR，以及可选的 OpenAI-compatible AI 分析能力。
+## Features
 
-![Dashboard](docs/images/dashboard.png)
+- Read-only Canvas API access. Canvas credentials stay on the backend.
+- Local SQLite cache for courses, announcements, assignments, calendar events, pages, people, and file indexes.
+- Course file backup, ZIP download, preview, text extraction, and OCR-assisted parsing.
+- Structured timeline from synced assignments, calendar events, and announcements.
+- Runtime settings for Canvas token, sync schedule, OCR, Telegram, and email notifications.
+- Event logs for sync, file, announcement, assignment, and notification activity.
 
-## 项目特点
+The AI analysis and Agent chat module has been removed. There are no OpenAI-compatible settings, model calls, generated course analysis routes, or Agent UI routes.
 
-- 只读 Canvas 访问：后端 Canvas 客户端只允许 `GET` 和 `HEAD`，Token 不会暴露给浏览器；对限流/瞬时错误自动重试退避，并对单文件下载设有大小上限。
-- 增量同步与本地备份：课程元数据、课件索引和选中文件可保存到本地 `data/` 目录；单门课程同步失败相互隔离、不影响整轮，已在 Canvas 删除的公告/作业/日程/页面等条目会同步清理（已下载的课件文件保留），下载前会预检磁盘空间。
-- 面包屑文件浏览器：重构了文件管理视图，支持按树形文件夹级别逐级导航，并支持通过面包屑快速返回上级目录，体验更佳。
-- 资料解析：支持 PDF、PPTX、DOCX、HTML、文本、ZIP 等资料的文本抽取，PDF 可按配置启用 OCR。
-- AI 课程分析与对话：支持展示实时流式“Thinking”思维链（可折叠），可视化工具调用（参数、执行进度），支持随时中断，并支持对话的删除与管理；模型不可用或返回异常时回退到本地分析，本地 `bash`/`grep` 工具运行在项目沙箱内、拒绝读取凭据类敏感路径，且默认关闭。
-- 动态模型选择与测试：内置 `/v1/models` 自动拉取与配置测试，可以直接在界面切换和连通性测试。
-- 通知能力：支持 Telegram 和邮件提醒；未配置 SMTP 时邮件会写入本地 outbox。
-- Windows 友好：内置一键启动脚本与计划任务，运行命令中默认开启 `-X utf8` 并重构标准流编码，有效防止非 ASCII 字符管道输出引起的 `UnicodeEncodeError` 崩溃。
+## Requirements
 
-## 技术栈
+- Python 3.11+
+- Node.js LTS and npm
+- Optional: Tesseract OCR for scanned PDFs/images
 
-- 后端：FastAPI、httpx、pydantic-settings、SQLite
-- 文件解析：PyMuPDF、python-pptx、python-docx、BeautifulSoup、Pillow、pytesseract（OCR）
-- 前端：React 19 + TypeScript、Vite、Vanilla CSS、lucide-react
-- AI：OpenAI-compatible `/v1/chat/completions` 与 `/v1/models` 接口
-- 测试：pytest、pytest-asyncio、FastAPI TestClient、TypeScript build
-
-## 安装
-
-需要先安装 Python 3.11+、Node.js LTS 和 npm。OCR 是可选能力，如需识别扫描版 PDF，请额外安装 Tesseract OCR。
+## Setup
 
 ```powershell
 python -m venv .venv
@@ -38,71 +30,31 @@ npm --prefix frontend install
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，至少填写：
+Edit `.env` and set:
 
 ```dotenv
 CANVAS_BASE_URL=https://your-school.instructure.com/
-CANVAS_API_TOKEN=
+CANVAS_API_TOKEN=your_canvas_token
 ```
 
-如需 AI 分析，再填写：
-
-```dotenv
-OPENAI_COMPAT_BASE_URL=https://api.example.com/v1
-OPENAI_COMPAT_API_KEY=
-OPENAI_COMPAT_MODEL=gpt-4.1-mini
-```
-
-重试次数、各类超时、单文件下载上限、OCR 超时、备份磁盘余量等都有合理默认值，可按需在 `.env` 覆盖。出于安全考虑，AI 的本地 `bash`/`grep` 工具默认关闭；仅在可信机器上需要让它在项目沙箱内读写文件时再开启：
-
-```dotenv
-AGENT_SHELL_TOOLS_ENABLED=true
-```
-
-## 使用方式
-
-![Files](docs/images/files.png)
-
-推荐直接运行：
+## Run
 
 ```powershell
 .\start.ps1
 ```
 
-也可以使用 npm 同时启动前后端：
+Or run the development servers manually:
 
 ```powershell
 npm run dev
 ```
 
-默认访问地址：
+Default URLs:
 
-- 前端：<http://127.0.0.1:5173>
-- 后端健康检查：<http://127.0.0.1:8000/api/health>
+- Frontend: http://127.0.0.1:5173
+- Backend health check: http://127.0.0.1:8000/api/health
 
-第一次同步会下载和解析课程资料，耗时取决于课程数量、文件大小和 OCR 配置。
-
-## 计划任务
-
-注册一个登录后自动启动的 Windows 计划任务：
-
-```powershell
-.\scripts\install-scheduled-task.ps1 -StartNow
-```
-
-改成每天固定时间启动：
-
-```powershell
-.\scripts\install-scheduled-task.ps1 -Trigger Daily -At 09:00
-```
-
-卸载计划任务：
-
-```powershell
-.\scripts\uninstall-scheduled-task.ps1
-```
-
-## 测试
+## Test
 
 ```powershell
 pip install -r requirements-dev.txt
@@ -110,14 +62,10 @@ pytest
 npm --prefix frontend run build
 ```
 
-## 文档
+## Documentation
 
-系统架构、模块职责、数据模型、接口契约与安全边界见 [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md)。
+See [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md) for architecture, API contracts, data model, and security boundaries.
 
-## 安全与公开仓库说明
+## Security
 
-公开仓库只应提交源码、文档和依赖清单。`.env`、本地数据库、日志、同步下来的课程资料、虚拟环境和 `node_modules` 都已在 `.gitignore` 中排除。提交前建议再次运行敏感信息扫描，确认没有 Token、API Key、课程文件或个人数据进入 Git 历史。
-
-## 免责声明
-
-本项目是个人开发的非官方工具，与 Instructure / Canvas 没有任何关联。它只通过官方 Canvas API 进行只读访问；请遵守所在院校的使用条款，妥善保管自己的 API Token，并仅同步你有权访问的课程资料。
+Do not commit `.env`, local databases, logs, downloaded course material, virtual environments, `node_modules`, or build output. These are ignored by default.

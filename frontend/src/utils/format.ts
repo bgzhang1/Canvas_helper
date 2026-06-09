@@ -24,3 +24,9 @@ export function fmtBytes(value: number | null | undefined) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+export function htmlToText(value: string | null | undefined) {
+  if (!value) return '';
+  const doc = new DOMParser().parseFromString(value, 'text/html');
+  return doc.body.textContent?.trim() || value;
+}

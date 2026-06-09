@@ -11,30 +11,11 @@ class SyncSettingsIn(BaseModel):
 
 
 class CanvasSettingsIn(BaseModel):
-    base_url: str | None = None
     api_token: str | None = None
 
 
 class CanvasSettingsTestIn(BaseModel):
-    base_url: str | None = None
     api_token: str | None = None
-
-
-class AISettingsIn(BaseModel):
-    base_url: str | None = None
-    api_key: str | None = None
-    model: str = "gpt-4.1-mini"
-    reasoning_effort: str = "medium"
-    skills: str = ""
-
-
-class AISettingsTestIn(BaseModel):
-    base_url: str | None = None
-    api_key: str | None = None
-
-
-class AIModelIn(BaseModel):
-    model: str = ""
 
 
 class NotificationSettingsIn(BaseModel):
@@ -45,18 +26,5 @@ class NotificationSettingsIn(BaseModel):
     email_target: str = ""
 
 
-class AgentChatMessageIn(BaseModel):
-    role: str
-    content: str = Field(default="", max_length=200_000)
-
-
-class AgentChatIn(BaseModel):
-    message: str = Field(max_length=50_000)
-    history: list[AgentChatMessageIn] = Field(default_factory=list, max_length=100)
-    course_id: int | None = None
-    session_id: str | None = None
-    session_title: str | None = None
-
-
 class FileSelectionIn(BaseModel):
-    file_ids: list[int] = Field(default_factory=list, max_length=1000)
+    file_ids: list[int] = Field(default_factory=list)

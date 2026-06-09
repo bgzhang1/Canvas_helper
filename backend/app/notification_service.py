@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import smtplib
-import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import Any
 
 import httpx
 
-from agent import AgentTool
 from .db import Database, utc_now
 
 
@@ -21,7 +19,7 @@ class NotificationConfig:
     telegram_chat_id: str = ""
     email_enabled: bool = False
     email_target: str = ""
-    email_from: str = "canvas-helper@localhost"
+    email_from: str = "canvas-material@localhost"
     email_outbox_dir: Path = Path("./data/email_outbox")
     smtp_host: str | None = None
     smtp_port: int = 587
@@ -65,20 +63,9 @@ class NotificationService:
             client = httpx.Client(timeout=15.0)
             close_client = True
         try:
-            data = None
-            for attempt in range(3):
-                try:
-                    response = client.post(url, json=payload)
-                    if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                        time.sleep(0.5 * (2**attempt))
-                        continue
-                    response.raise_for_status()
-                    data = response.json()
-                    break
-                except httpx.TransportError:
-                    if attempt >= 2:
-                        raise
-                    time.sleep(0.5 * (2**attempt))
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
         finally:
             if close_client:
                 client.close()
@@ -188,56 +175,6 @@ class NotificationService:
         if not sep:
             return "***"
         return (local[:2] + "***@" + domain) if len(local) > 2 else "***@" + domain
-
-
-def build_notification_agent_tools(service: NotificationService) -> list[AgentTool]:
-    tools: list[AgentTool] = []
-    if service.telegram_available():
-        tools.append(
-            AgentTool(
-                name="telegram_bot",
-                description="Send a concise notification through the Telegram bot configured in Settings.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "Message text to send."},
-                        "disable_notification": {"type": "boolean", "default": False},
-                    },
-                    "required": ["text"],
-                },
-                handler=lambda args: service.send_telegram_message(
-                    str(args.get("text") or ""),
-                    disable_notification=bool(args.get("disable_notification", False)),
-                ),
-            )
-        )
-    if service.email_available():
-        tools.append(
-            AgentTool(
-                name="email_reminder",
-                description=(
-                    "Send or queue an email reminder to the email target configured in Settings. "
-                    "Use for high-confidence deadlines, urgent risks, or explicit reminder instructions."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string"},
-                        "body": {"type": "string"},
-                        "due_at": {"type": "string", "description": "Optional ISO date/time related to the reminder."},
-                        "priority": {"type": "string", "enum": ["normal", "high", "urgent"], "default": "normal"},
-                    },
-                    "required": ["subject", "body"],
-                },
-                handler=lambda args: service.send_email_reminder(
-                    subject=str(args.get("subject") or ""),
-                    body=str(args.get("body") or ""),
-                    due_at=str(args.get("due_at")) if args.get("due_at") else None,
-                    priority=str(args.get("priority") or "normal"),
-                ),
-            )
-        )
-    return tools
 
 
 def _clean_message(value: str, *, limit: int) -> str:

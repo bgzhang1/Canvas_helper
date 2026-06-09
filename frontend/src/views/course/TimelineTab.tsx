@@ -1,25 +1,15 @@
-import { type KeyboardEvent, type MouseEvent, useMemo, useState } from 'react';
+import { type KeyboardEvent, useMemo, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import type { CourseDetail, TimelineItem } from '../../types';
-import type { TFunction } from '../../i18n';
 import { useAppContext } from '../../context/AppContext';
 import { Badge, EmptyState } from '../../components/ui';
 import { fmtDate } from '../../utils/format';
 
-export function TimelineTab({
-  detail,
-  analyzing = false
-}: {
-  detail: CourseDetail;
-  analyzing?: boolean;
-}) {
+export function TimelineTab({ detail }: { detail: CourseDetail }) {
   const { t } = useAppContext();
-  const aiItems = detail.timeline.analysis?.timeline;
-  const isAiTimeline = Boolean(aiItems?.length);
-  const sourceItems = isAiTimeline ? aiItems! : detail.timeline.structured;
+  const sourceItems = detail.timeline.structured;
   const [isPastExpanded, setIsPastExpanded] = useState(false);
   const [expandedItemKey, setExpandedItemKey] = useState<string | null>(null);
-  const [openConfidence, setOpenConfidence] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
   const { items, pastItems, currentItems } = useMemo(() => {
     const threshold = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const itemTime = (item: TimelineItem) => {
@@ -44,25 +34,12 @@ export function TimelineTab({
     const expanded = expandedItemKey === itemKey;
     const cardClassName = 'w-full text-left border border-black p-6 transition-colors hover:bg-[#E8E8E3] cursor-pointer';
     function toggleCard() {
-      setOpenConfidence(null);
       setExpandedItemKey((current) => (current === itemKey ? null : itemKey));
     }
     function handleCardKeyDown(event: KeyboardEvent<HTMLDivElement>) {
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       toggleCard();
-    }
-    function toggleConfidence(event: MouseEvent<HTMLButtonElement>) {
-      event.stopPropagation();
-      const rect = event.currentTarget.getBoundingClientRect();
-      const width = Math.min(288, window.innerWidth - 24);
-      const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, 12), window.innerWidth - width - 12);
-      const below = rect.bottom + 8;
-      const top = below + 140 > window.innerHeight ? Math.max(12, rect.top - 148) : below;
-      setOpenConfidence((current) => {
-        if (current?.key === itemKey) return null;
-        return { key: itemKey, left, top, width };
-      });
     }
     const content = (
       <>
@@ -78,31 +55,6 @@ export function TimelineTab({
         </p>
         <div className="flex flex-wrap gap-3">
           <Badge>{item.source}</Badge>
-          {analyzing && <Badge variant="warning">{t('analyzing')}</Badge>}
-          {isAiTimeline && item.confidence && (
-            <span className="relative inline-flex">
-              <button
-                type="button"
-                onClick={toggleConfidence}
-                className={`px-2 py-0.5 text-[10px] font-mono tracking-widest uppercase border ${
-                  confidenceVariantClass(item.confidence)
-                }`}
-                aria-expanded={openConfidence?.key === itemKey}
-              >
-                {t('confidence')}: {item.confidence}
-              </button>
-              {openConfidence?.key === itemKey && (
-                <div
-                  className="fixed z-[2147483647] border border-black bg-white p-4 text-left text-black shadow-[6px_6px_0_0_rgba(0,0,0,1)]"
-                  style={{ left: openConfidence.left, top: openConfidence.top, width: openConfidence.width }}
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div className="mb-2 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500">{t('confidenceReason')}</div>
-                  <p className="text-xs font-medium leading-relaxed normal-case tracking-normal">{confidenceReason(item, t)}</p>
-                </div>
-              )}
-            </span>
-          )}
         </div>
         {expanded && (
           <div className="mt-5 border-t border-black pt-5" onClick={(event) => event.stopPropagation()}>
@@ -110,14 +62,7 @@ export function TimelineTab({
               <TimelineDetail label="DATE" value={fmtDate(item.date)} />
               <TimelineDetail label={t('source')} value={item.source} />
               {item.item_id != null && <TimelineDetail label="ITEM_ID" value={String(item.item_id)} />}
-              {item.confidence && <TimelineDetail label={t('confidence')} value={item.confidence} />}
             </div>
-            {(isAiTimeline || item.confidence_reason) && (
-              <div className="mt-4 border border-black bg-white p-4 text-black">
-                <div className="mb-2 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500">{t('confidenceReason')}</div>
-                <p className="text-xs font-medium leading-relaxed">{confidenceReason(item, t)}</p>
-              </div>
-            )}
           </div>
         )}
       </>
@@ -140,7 +85,7 @@ export function TimelineTab({
   }
 
   return (
-    <div className="space-y-12" onClick={() => setOpenConfidence(null)}>
+    <div className="space-y-12">
       {items.length === 0 ? (
         <EmptyState>{t('noSyncedDates')}</EmptyState>
       ) : (
@@ -171,19 +116,4 @@ function TimelineDetail({ label, value }: { label: string; value: string }) {
       <div className="break-words font-bold">{value}</div>
     </div>
   );
-}
-
-function confidenceVariantClass(value: string) {
-  const normalized = value.toLowerCase();
-  if (normalized === 'high') return 'border-black bg-black text-[#F4F4F0]';
-  if (normalized === 'low') return 'border-black bg-white text-black underline decoration-2';
-  return 'border-black bg-[#F4F4F0] text-black decoration-wavy underline decoration-1';
-}
-
-function confidenceReason(item: TimelineItem, t: TFunction) {
-  if (item.confidence_reason?.trim()) return item.confidence_reason.trim();
-  const normalized = item.confidence?.toLowerCase();
-  if (normalized === 'high') return t('confidenceHighReason');
-  if (normalized === 'low') return t('confidenceLowReason');
-  return t('confidenceMediumReason');
 }

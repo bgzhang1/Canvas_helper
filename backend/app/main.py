@@ -1,27 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-# Ensure stdout/stderr can carry non-ASCII (Chinese course data, provider error
-# bodies) regardless of the host locale. On Windows the backend is launched under
-# a piped, non-UTF-8 stream where writing such text raises UnicodeEncodeError.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
-    except (AttributeError, ValueError):
-        pass
-
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import runtime
-from .api import ai, courses, events, files, health, settings as settings_api, sync
+from .api import courses, events, files, health, settings as settings_api, sync
 from .config import get_settings
 
 # Re-exported so tests and tooling can reach runtime state via this module
@@ -50,7 +38,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Canvas_helper", lifespan=lifespan)
+app = FastAPI(title="Canvas Material Manager", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -59,24 +47,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_MAX_BODY_BYTES = 25 * 1024 * 1024
-
-
-@app.middleware("http")
-async def _limit_body_size(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > _MAX_BODY_BYTES:
-        return JSONResponse(status_code=413, content={"detail": "Request body too large"})
-    return await call_next(request)
-
-
-@app.exception_handler(Exception)
-async def _unhandled_exception_handler(request: Request, exc: Exception):
-    logging.getLogger("canvas_helper").exception("Unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
-
-
-for module in (health, courses, files, sync, settings_api, ai, events):
+for module in (health, courses, files, sync, settings_api, events):
     app.include_router(module.router)
 
 

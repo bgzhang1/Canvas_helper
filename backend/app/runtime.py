@@ -14,29 +14,13 @@ from typing import Any
 
 from fastapi import BackgroundTasks, HTTPException
 
-from agent import AIAnalysisService, AIConfig
 from .backup_service import BackupService
 from .canvas_client import CanvasReadOnlyClient
 from .config import Settings
 from .db import Database
 from .extraction_service import ExtractionService
-from .notification_service import NotificationConfig, NotificationService, build_notification_agent_tools
+from .notification_service import NotificationConfig, NotificationService
 from .sync_service import SyncService
-
-
-def initial_analysis_progress() -> dict[str, Any]:
-    return {
-        "running": False,
-        "status": "idle",
-        "percent": 0,
-        "stage": "Idle",
-        "course_id": None,
-        "course": None,
-        "file": None,
-        "current": None,
-        "total": None,
-        "message": None,
-    }
 
 
 class AppState:
@@ -45,13 +29,8 @@ class AppState:
         self.db = Database(settings.db_path)
         self.sync_lock = asyncio.Lock()
         self.file_sync_lock = asyncio.Lock()
-        self.analysis_lock = asyncio.Lock()
         self.sync_cancel_event = asyncio.Event()
-        self.file_sync_cancel_event = asyncio.Event()
         self.scheduler_task: asyncio.Task | None = None
-        self.analysis_progress = initial_analysis_progress()
-        # Track file IDs currently being downloaded to prevent duplicate parallel downloads.
-        self.active_backup_files: set[int] = set()
 
 
 _app_state: AppState | None = None
@@ -104,13 +83,10 @@ def project_root() -> Path:
 def make_canvas_client() -> CanvasReadOnlyClient:
     settings = state().settings
     return CanvasReadOnlyClient(
-        get_canvas_base_url(),
+        settings.canvas_base_url,
         get_canvas_api_token(),
         timeout_seconds=settings.canvas_timeout_seconds,
         download_timeout_seconds=settings.canvas_download_timeout_seconds,
-        max_retries=settings.canvas_max_retries,
-        max_pages=settings.canvas_max_pages,
-        max_download_bytes=settings.canvas_max_download_bytes,
         logger=logging.getLogger("canvas_audit"),
     )
 
@@ -123,23 +99,6 @@ def make_extractor() -> ExtractionService:
         ocr_enabled=settings.ocr_enabled,
         ocr_languages=settings.ocr_languages,
         ocr_max_pages=settings.ocr_max_pages,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
-    )
-
-
-def make_ai_service() -> AIAnalysisService:
-    ai_settings = get_ai_settings(include_secrets=True)
-    notification_service = make_notification_service()
-    return AIAnalysisService(
-        state().db,
-        AIConfig(
-            base_url=ai_settings["base_url"] or None,
-            api_key=ai_settings["api_key"] or None,
-            model=ai_settings["model"],
-            reasoning_effort=ai_settings["reasoning_effort"],
-            skills=ai_settings["skills"],
-        ),
-        agent_tools=build_notification_agent_tools(notification_service),
     )
 
 
@@ -194,33 +153,11 @@ def get_canvas_api_token() -> str:
     return state().db.get_setting("canvas.api_token", settings.canvas_api_token or "") or ""
 
 
-def get_canvas_base_url() -> str:
-    settings = state().settings
-    return state().db.get_setting("canvas.base_url", settings.canvas_base_url) or settings.canvas_base_url
-
-
 def get_canvas_settings() -> dict[str, Any]:
     return {
-        "canvas_base_url": get_canvas_base_url(),
+        "canvas_base_url": state().settings.canvas_base_url,
         "token_configured": bool(get_canvas_api_token()),
     }
-
-
-def get_ai_settings(*, include_secrets: bool = False) -> dict[str, Any]:
-    db = state().db
-    settings = state().settings
-    api_key = db.get_setting("ai.api_key", settings.openai_compat_api_key or "") or ""
-    payload: dict[str, Any] = {
-        "base_url": db.get_setting("ai.base_url", settings.openai_compat_base_url or "") or "",
-        "configured": bool((db.get_setting("ai.base_url", settings.openai_compat_base_url or "") or "") and api_key),
-        "api_key_configured": bool(api_key),
-        "model": db.get_setting("ai.model", settings.openai_compat_model) or settings.openai_compat_model,
-        "reasoning_effort": db.get_setting("ai.reasoning_effort", "medium") or "medium",
-        "skills": db.get_setting("ai.skills", "") or "",
-    }
-    if include_secrets:
-        payload["api_key"] = api_key
-    return payload
 
 
 def get_notification_settings(*, include_secrets: bool = False) -> dict[str, Any]:
@@ -255,30 +192,12 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
     ``course_id is None`` performs a full sync (all courses); otherwise it syncs
     a single course's non-file metadata. Shared by the background endpoints and
     the scheduler so the orchestration lives in exactly one place.
-
-    Uses non-blocking lock acquisition to close the TOCTOU window: if two
-    callers both passed the ``sync_lock.locked()`` pre-check before either
-    acquired the lock, the second one will fail ``acquire()`` here and abandon
-    its run immediately instead of silently queuing a duplicate sync.
     """
     app_state = state()
-    acquired = app_state.sync_lock.locked()
-    if not acquired:
-        acquired = True
-        await app_state.sync_lock.acquire()
-    else:
-        # Lock is held by another task – abandon this duplicate run.
-        app_state.db.finish_sync_run(run_id, "skipped", "Another sync was already running.")
-        return
-    try:
+    async with app_state.sync_lock:
         try:
             async with make_canvas_client() as canvas:
-                backup = BackupService(
-                    app_state.db,
-                    canvas,
-                    app_state.settings.data_dir,
-                    min_free_bytes=app_state.settings.backup_min_free_bytes,
-                )
+                backup = BackupService(app_state.db, canvas, app_state.settings.data_dir)
                 service = SyncService(
                     app_state.db,
                     canvas,
@@ -305,23 +224,9 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
             )
         finally:
             app_state.sync_cancel_event.clear()
-    finally:
-        app_state.sync_lock.release()
 
 
 def launch_metadata_sync(background_tasks: BackgroundTasks, *, course_id: int | None = None) -> dict[str, Any]:
-    """Atomically start a metadata sync if none is running.
-
-    Uses non-blocking ``Lock.locked()`` only as a fast pre-check; the real
-    guard is inside ``_execute_metadata_sync`` which calls ``sync_lock.acquire()``.
-    The run_id is created *before* the background task is queued so that:
-    1. The caller always receives a valid ``run_id``.
-    2. If a second request arrives before the first task's ``acquire()``, the
-       ``sync_lock.locked()`` check rejects it (the lock is held by then).
-    However, to close the TOCTOU window where two requests both see the lock
-    as free, ``_execute_metadata_sync`` performs a secondary non-blocking
-    acquire check and abandons the duplicate run.
-    """
     app_state = state()
     if app_state.sync_lock.locked():
         return {"status": "already_running", "run": app_state.db.latest_sync_run()}

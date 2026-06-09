@@ -1,25 +1,22 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, MessageSquare, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
+import type { ActiveTab, AppSettings, Course, CourseDetail, SyncStatus, View } from './types';
 import type { Lang, TFunction } from './i18n';
-import type { View } from './types';
 import { translate } from './i18n';
 import { AppContext, type AppContextValue } from './context/AppContext';
+import { fetchCourseDetail, fetchCourses, startCourseSync } from './api/courses';
+import { fetchSettings } from './api/settings';
+import { cancelSync, fetchSyncStatus, startGlobalSync } from './api/sync';
 import { EmptyState, GridBackground } from './components/ui';
 import { SidebarButton } from './components/SidebarButton';
 import { SyncProgressBar } from './components/SyncProgressBar';
+import { DashboardView } from './views/DashboardView';
+import { CourseDetailView } from './views/CourseDetailView';
+import { SettingsView } from './views/SettingsView';
 import { courseCode, statusForCourse } from './utils/course';
-import { analysisStatusToProgress, parseSyncProgress } from './utils/progress';
+import { parseSyncProgress } from './utils/progress';
 import { useTermGroups } from './hooks/useTermGroups';
-import { useCanvasData } from './hooks/useCanvasData';
-import { useAnnouncementsSeen } from './hooks/useAnnouncementsSeen';
-import { useExternalLinkHardening } from './hooks/useExternalLinkHardening';
-
-// Route-level code splitting (4.7): each view ships as its own chunk, loaded on demand.
-const DashboardView = lazy(() => import('./views/DashboardView').then((m) => ({ default: m.DashboardView })));
-const CourseDetailView = lazy(() => import('./views/CourseDetailView').then((m) => ({ default: m.CourseDetailView })));
-const AgentChatView = lazy(() => import('./views/AgentChatView').then((m) => ({ default: m.AgentChatView })));
-const SettingsView = lazy(() => import('./views/SettingsView').then((m) => ({ default: m.SettingsView })));
 
 export function App() {
   const navigate = useNavigate();
@@ -28,48 +25,41 @@ export function App() {
   const selectedCourseId = courseMatch?.params.courseId ? Number(courseMatch.params.courseId) : null;
 
   const [lang, setLang] = useState<Lang>('zh');
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [detail, setDetail] = useState<CourseDetail | null>(null);
+  const [activeTab, setActiveTab] = useState<ActiveTab>('timeline');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ running: false, run: null });
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isCancellingSync, setIsCancellingSync] = useState(false);
+  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [agentCourseId, setAgentCourseId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [mobileSystemOpen, setMobileSystemOpen] = useState(false);
   const [mobileCoursesOpen, setMobileCoursesOpen] = useState(false);
+  const [seenAnnouncements, setSeenAnnouncements] = useState<Record<number, number>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('canvasSeenAnnouncements') || '{}') as Record<number, number>;
+    } catch {
+      return {};
+    }
+  });
   const t = useCallback<TFunction>((key) => translate(lang, key), [lang]);
-
-  const {
-    courses,
-    selectedCourse,
-    detail,
-    activeTab,
-    setActiveTab,
-    syncStatus,
-    analysisStatus,
-    showAnalysisDone,
-    settings,
-    setSettings,
-    error,
-    setError,
-    busy,
-    setBusy,
-    isLoadingDetail,
-    syncActive,
-    cancelActive,
-    analysisActive,
-    loadSettings,
-    handleGlobalSync,
-    handleCourseSync,
-    handleAnalyzeCourse,
-    handleCancelSync,
-    refreshSelectedCourse
-  } = useCanvasData(selectedCourseId);
-
   const courseGroups = useTermGroups(courses);
-  const { seenAnnouncements, markCourseAnnouncementsSeen } = useAnnouncementsSeen(courses);
-  useExternalLinkHardening();
+
+  const selectedCourse = useMemo(
+    () => (selectedCourseId != null ? courses.find((course) => course.id === selectedCourseId) ?? null : null),
+    [courses, selectedCourseId]
+  );
+  const selectedCourseRef = useRef<Course | null>(null);
+  selectedCourseRef.current = selectedCourse;
+  const loadedCourseIdRef = useRef<number | null>(null);
+  const detailRequestIdRef = useRef(0);
 
   const currentView: View = courseMatch
     ? 'course'
-    : location.pathname.startsWith('/agent')
-      ? 'agent'
-      : location.pathname.startsWith('/settings')
+    : location.pathname.startsWith('/settings')
         ? 'settings'
         : 'dashboard';
 
@@ -79,6 +69,47 @@ export function App() {
     return courses.filter((course) => `${course.name} ${course.course_code ?? ''} ${course.term_name ?? ''}`.toLowerCase().includes(needle));
   }, [courses, query]);
 
+  useEffect(() => {
+    loadInitial();
+  }, []);
+
+  const markCourseAnnouncementsSeen = useCallback((courseId: number, count: number) => {
+    setSeenAnnouncements((prev) => {
+      if (prev[courseId] === count) return prev;
+      const next = { ...prev, [courseId]: count };
+      try {
+        localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
+      } catch {
+        /* ignore storage errors */
+      }
+      return next;
+    });
+  }, []);
+
+  // Baseline newly discovered courses to their current count, so only later
+  // increases (new announcements after a refresh) light up the red dot.
+  useEffect(() => {
+    if (courses.length === 0) return;
+    setSeenAnnouncements((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const course of courses) {
+        if (!(course.id in next)) {
+          next[course.id] = course.announcement_count;
+          changed = true;
+        }
+      }
+      if (changed) {
+        try {
+          localStorage.setItem('canvasSeenAnnouncements', JSON.stringify(next));
+        } catch {
+          /* ignore storage errors */
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [courses]);
+
   // Viewing a course's announcements clears its "new" dot.
   useEffect(() => {
     if (currentView === 'course' && activeTab === 'announcements' && selectedCourse) {
@@ -87,26 +118,172 @@ export function App() {
   }, [currentView, activeTab, selectedCourse, markCourseAnnouncementsSeen]);
 
   useEffect(() => {
+    function markLink(link: HTMLAnchorElement) {
+      link.target = '_blank';
+      const rel = new Set(link.rel.split(/\s+/).filter(Boolean));
+      rel.add('noopener');
+      rel.add('noreferrer');
+      link.rel = Array.from(rel).join(' ');
+    }
+
+    function markLinks(root: ParentNode) {
+      root.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(markLink);
+    }
+
+    function handleLinkClick(event: MouseEvent) {
+      const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
+      if (target) markLink(target);
+    }
+
+    markLinks(document);
+    document.addEventListener('click', handleLinkClick, true);
+    document.addEventListener('auxclick', handleLinkClick, true);
+    return () => {
+      document.removeEventListener('click', handleLinkClick, true);
+      document.removeEventListener('auxclick', handleLinkClick, true);
+    };
+  }, []);
+
+  useEffect(() => {
     setMobileSystemOpen(false);
     setMobileCoursesOpen(false);
   }, [location.pathname]);
 
+  const syncActive = isSyncing || syncStatus.running || syncStatus.run?.status === 'running';
+  const cancelActive = isCancellingSync || Boolean(syncStatus.cancel_requested);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => loadSyncStatus().catch(() => undefined), syncActive ? 1000 : 5000);
+    return () => window.clearInterval(timer);
+  }, [syncActive]);
+
+  // Load (or clear) the course detail whenever the routed course changes.
+  useEffect(() => {
+    if (selectedCourseId == null) {
+      setDetail(null);
+      loadedCourseIdRef.current = null;
+      return;
+    }
+    if (loadedCourseIdRef.current === selectedCourseId) return;
+    const course = courses.find((item) => item.id === selectedCourseId);
+    if (!course) return;
+    loadedCourseIdRef.current = selectedCourseId;
+    setActiveTab('timeline');
+    void loadCourseDetail(course);
+  }, [selectedCourseId, courses]);
+
+  async function loadInitial() {
+    await Promise.all([loadCourses(), loadSyncStatus(), loadSettings()]);
+  }
+
+  async function loadCourses() {
+    try {
+      setCourses(await fetchCourses());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function loadSyncStatus() {
+    const nextStatus = await fetchSyncStatus();
+    setSyncStatus((previous) => {
+      const previousActive = previous.running || previous.run?.status === 'running';
+      const nextActive = nextStatus.running || nextStatus.run?.status === 'running';
+      if (previousActive && !nextActive) {
+        void loadCourses();
+        const course = selectedCourseRef.current;
+        if (course) void loadCourseDetail(course);
+      }
+      return nextStatus;
+    });
+  }
+
+  async function loadSettings() {
+    try {
+      setSettings(await fetchSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function loadCourseDetail(course: Course) {
+    const requestId = ++detailRequestIdRef.current;
+    setIsLoadingDetail(true);
+    setDetail(null);
+    setError(null);
+    try {
+      const nextDetail = await fetchCourseDetail(course.id);
+      if (detailRequestIdRef.current === requestId && selectedCourseRef.current?.id === course.id) {
+        setDetail(nextDetail);
+      }
+    } catch (err) {
+      if (detailRequestIdRef.current === requestId && selectedCourseRef.current?.id === course.id) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (detailRequestIdRef.current === requestId) {
+        setIsLoadingDetail(false);
+      }
+    }
+  }
+
+  async function handleGlobalSync() {
+    setIsSyncing(true);
+    setError(null);
+    try {
+      await startGlobalSync();
+      await loadSyncStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
+  async function handleCourseSync(course: Course) {
+    setIsSyncing(true);
+    setError(null);
+    try {
+      await startCourseSync(course.id);
+      await loadSyncStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
+  async function handleCancelSync() {
+    setIsCancellingSync(true);
+    setError(null);
+    try {
+      await cancelSync();
+      await loadSyncStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCancellingSync(false);
+    }
+  }
+
+  async function refreshSelectedCourse() {
+    await loadCourses();
+    const course = selectedCourseRef.current;
+    if (course) await loadCourseDetail(course);
+  }
+
   const syncProgress = parseSyncProgress(syncStatus);
   const showSyncProgress = syncActive || syncStatus.run?.status === 'failed' || syncStatus.run?.status === 'cancelled';
-  const analysisProgress = analysisStatusToProgress(analysisStatus);
-  const showAnalysisProgress = analysisActive || showAnalysisDone || analysisStatus.status === 'failed';
-  const showSidebarProgress = showSyncProgress || showAnalysisProgress;
+  const showSidebarProgress = showSyncProgress;
 
   const contextValue = useMemo<AppContextValue>(
-    () => ({ lang, setLang, t, canvasBaseUrl: settings?.canvas_base_url ?? '', error, setError, busy, setBusy, query, setQuery }),
-    [lang, t, settings?.canvas_base_url, error, setError, busy, setBusy, query]
+    () => ({ lang, setLang, t, error, setError, busy, setBusy, query, setQuery }),
+    [lang, t, error, busy, query]
   );
   const mobileViewLabel =
     currentView === 'dashboard'
       ? t('dashboard')
-      : currentView === 'agent'
-        ? t('agent')
-        : currentView === 'settings'
+      : currentView === 'settings'
           ? t('configuration')
           : selectedCourse
             ? courseCode(selectedCourse)
@@ -175,16 +352,6 @@ export function App() {
                 >
                   <SquareTerminal size={16} />
                   {t('dashboard')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateMobile('/agent')}
-                  className={`w-full flex items-center gap-3 border-b border-black px-4 py-3 text-left text-sm font-mono ${
-                    currentView === 'agent' ? 'bg-black text-[#F4F4F0]' : 'bg-[#F4F4F0] text-black'
-                  }`}
-                >
-                  <MessageSquare size={16} />
-                  {t('agent')}
                 </button>
                 <button
                   type="button"
@@ -261,9 +428,6 @@ export function App() {
               <SidebarButton active={currentView === 'dashboard'} icon={<SquareTerminal size={18} strokeWidth={1.5} />} onClick={() => navigate('/')}>
                 {t('dashboard')}
               </SidebarButton>
-              <SidebarButton active={currentView === 'agent'} icon={<MessageSquare size={18} strokeWidth={1.5} />} onClick={() => navigate('/agent')}>
-                {t('agent')}
-              </SidebarButton>
               <SidebarButton active={currentView === 'settings'} icon={<Settings2 size={18} strokeWidth={1.5} />} onClick={() => navigate('/settings')}>
                 {t('configuration')}
               </SidebarButton>
@@ -323,7 +487,6 @@ export function App() {
           {showSidebarProgress && (
             <div className="px-4 py-4 border-t border-black bg-[#F4F4F0] space-y-3">
               {showSyncProgress && <SyncProgressBar progress={syncProgress} active={syncActive} />}
-              {showAnalysisProgress && <SyncProgressBar progress={analysisProgress} active={analysisActive} kind="analysis" />}
             </div>
           )}
         </aside>
@@ -332,7 +495,6 @@ export function App() {
           <header className="app-header min-h-16 border-b border-black bg-[#F4F4F0] flex items-center justify-between px-8 shrink-0">
             <div className="flex items-center gap-3 text-xs font-mono tracking-widest text-black min-w-0">
               {currentView === 'dashboard' && <span>~/{t('dashboard')}</span>}
-              {currentView === 'agent' && <span>~/{t('agent')}</span>}
               {currentView === 'settings' && <span>~/{t('configuration')}</span>}
               {currentView === 'course' && selectedCourse && (
                 <>
@@ -395,15 +557,10 @@ export function App() {
           )}
 
           <div className="app-content flex-1 min-h-0 overflow-y-auto p-12">
-            <Suspense fallback={<EmptyState>{t('loadingCourseMaterial')}</EmptyState>}>
             <Routes>
               <Route
                 path="/"
-                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} onSync={handleGlobalSync} syncActive={syncActive} />}
-              />
-              <Route
-                path="/agent"
-                element={<AgentChatView courses={courses} selectedCourseId={agentCourseId} setSelectedCourseId={setAgentCourseId} />}
+                element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} />}
               />
               <Route
                 path="/settings"
@@ -422,9 +579,6 @@ export function App() {
                       refreshCourse={refreshSelectedCourse}
                       onSyncCourse={handleCourseSync}
                       syncActive={syncActive}
-                      onAnalyzeCourse={handleAnalyzeCourse}
-                      analysisActive={analysisActive}
-                      analysisCourseId={analysisStatus.course_id ?? null}
                     />
                   ) : courses.length > 0 ? (
                     <Navigate to="/" replace />
@@ -435,7 +589,6 @@ export function App() {
               />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
-            </Suspense>
           </div>
         </main>
       </div>

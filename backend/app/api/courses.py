@@ -216,7 +216,6 @@ def select_course_home_from_db(conn: sqlite3.Connection, course_id: int) -> dict
 
 
 def build_timeline_from_db(conn: sqlite3.Connection, course_id: int) -> dict[str, Any]:
-    analysis = get_analysis_from_db(conn, course_id)
     assignments = rows_to_dicts(
         conn.execute(
             """
@@ -254,31 +253,12 @@ def build_timeline_from_db(conn: sqlite3.Connection, course_id: int) -> dict[str
     structured = sorted(assignments + announcements + calendar, key=lambda item: item.get("date") or "")
     return {
         "structured": structured,
-        "analysis": analysis,
         "data_sources": {
             "assignments": {"count": len(assignments)},
             "calendar_events": {"count": len(calendar)},
             "announcements": {"count": announcement_count},
-            "ai_analysis": {"available": analysis is not None},
         },
     }
-
-
-def get_analysis_from_db(
-    conn: sqlite3.Connection,
-    course_id: int,
-    kind: str = "course_overview",
-) -> dict[str, Any] | None:
-    row = conn.execute(
-        "SELECT content_json FROM analyses WHERE course_id = ? AND kind = ?",
-        (course_id, kind),
-    ).fetchone()
-    if not row:
-        return None
-    try:
-        return json.loads(row["content_json"])
-    except json.JSONDecodeError:
-        return None
 
 
 def _parse_raw_json(value: str | None) -> dict[str, Any]:

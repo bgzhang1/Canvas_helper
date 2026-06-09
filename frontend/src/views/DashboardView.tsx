@@ -1,4 +1,4 @@
-import { BookOpen, Database, RefreshCcw } from 'lucide-react';
+import { BookOpen, Database } from 'lucide-react';
 import { useMemo } from 'react';
 import type { Course, SyncStatus } from '../types';
 import { useAppContext } from '../context/AppContext';
@@ -6,7 +6,7 @@ import { Badge, EmptyState } from '../components/ui';
 import { courseNumber, groupCoursesByTerm, pickCurrentTermKey, statusForCourse } from '../utils/course';
 import { courseStatusLabel, syncStatusLabel } from '../utils/labels';
 
-export function DashboardView({ courses, syncStatus, seenAnnouncements, onSelectCourse, onSync, syncActive }: { courses: Course[]; syncStatus: SyncStatus; seenAnnouncements: Record<number, number>; onSelectCourse: (course: Course) => void | Promise<void>; onSync?: () => void; syncActive?: boolean }) {
+export function DashboardView({ courses, syncStatus, seenAnnouncements, onSelectCourse }: { courses: Course[]; syncStatus: SyncStatus; seenAnnouncements: Record<number, number>; onSelectCourse: (course: Course) => void | Promise<void> }) {
   const { t, query } = useAppContext();
   const searching = query.trim().length > 0;
   const groups = useMemo(() => groupCoursesByTerm(courses), [courses]);
@@ -82,22 +82,7 @@ export function DashboardView({ courses, syncStatus, seenAnnouncements, onSelect
       </div>
 
       {courses.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24 text-center">
-          <div className="mb-6 animate-pulse">
-            <RefreshCcw size={48} strokeWidth={1} className="text-gray-400" />
-          </div>
-          <h2 className="text-2xl font-bold tracking-tight mb-3">{t('noCourses')}</h2>
-          {onSync && (
-            <button
-              type="button"
-              onClick={onSync}
-              disabled={syncActive}
-              className="mt-6 px-8 py-3 border-2 border-black bg-black text-[#F4F4F0] font-mono text-sm tracking-widest uppercase hover:bg-[#F4F4F0] hover:text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {syncActive ? t('syncing') : t('forceSync')}
-            </button>
-          )}
-        </div>
+        <EmptyState>{t('noCourses')}</EmptyState>
       ) : (
         <>
           {!searching && currentGroup && (

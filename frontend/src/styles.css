@@ -73,8 +73,6 @@ select {
   word-break: break-word;
 }
 
-.agent-root,
-.agent-chat-panel,
 .files-toolbar,
 .files-actions {
   min-width: 0;
@@ -206,29 +204,6 @@ select {
     overflow-x: auto;
   }
 
-  .agent-root {
-    display: flex;
-    flex-direction: column;
-    height: auto;
-    min-height: 0;
-  }
-
-  .agent-sidebar {
-    max-height: 15rem;
-    flex: 0 0 auto;
-  }
-
-  .agent-chat-panel {
-    min-height: 34rem;
-  }
-
-  .agent-course-picker {
-    justify-content: stretch;
-  }
-
-  .agent-course-picker select {
-    width: 100%;
-  }
 }
 
 @media (max-width: 640px) {
@@ -250,27 +225,6 @@ select {
 
   .course-tabs {
     top: -0.75rem;
-  }
-
-  .agent-root {
-    gap: 0.75rem;
-  }
-
-  .agent-sidebar {
-    max-height: 12rem;
-  }
-
-  .agent-chat-panel {
-    min-height: 32rem;
-  }
-
-  .agent-compose {
-    flex-direction: column;
-  }
-
-  .agent-compose button {
-    min-height: 3rem;
-    width: 100%;
   }
 
   .files-toolbar {
