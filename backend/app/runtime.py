@@ -138,6 +138,18 @@ def course_label_or_404(course_id: int) -> str:
     return row["course_code"] or row["name"] or f"course_{course_id}"
 
 
+def course_label_or_default(course_id: int) -> str:
+    """Non-raising label lookup for logging/event paths (falls back to course_<id>)."""
+    with state().db.connect() as conn:
+        row = conn.execute(
+            "SELECT name, course_code FROM courses WHERE id = ?",
+            (course_id,),
+        ).fetchone()
+    if not row:
+        return f"course_{course_id}"
+    return row["course_code"] or row["name"] or f"course_{course_id}"
+
+
 def file_operation_status(backup_counts: dict[str, int], extraction_counts: dict[str, int]) -> str:
     failed = backup_counts.get("failed", 0) + extraction_counts.get("failed", 0)
     warnings = extraction_counts.get("partial", 0) + extraction_counts.get("skipped", 0)
@@ -237,7 +249,9 @@ async def _execute_metadata_sync(run_id: int, course_id: int | None) -> None:
                 status="failed",
                 title="Course metadata sync failed" if course_id is not None else "Metadata sync failed",
                 course_id=course_id,
-                course_name=course_label_or_404(course_id) if course_id is not None else None,
+                # Non-raising label: course_label_or_404 would raise inside this
+                # error path when the course was never synced, losing the event.
+                course_name=course_label_or_default(course_id) if course_id is not None else None,
                 message=f"{exc.__class__.__name__}: {exc}",
             )
         finally:

@@ -342,6 +342,17 @@ class Database:
                 (utc_now(),),
             )
 
+    def mark_stale_downloads_interrupted(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET backup_status = 'fail_download',
+                    backup_error = 'Server restarted while this file was downloading.'
+                WHERE backup_status = 'downloading'
+                """
+            )
+
     def add_event(
         self,
         *,

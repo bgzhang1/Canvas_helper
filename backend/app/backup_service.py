@@ -76,6 +76,7 @@ class BackupService:
                 check_cancelled()
             if on_progress:
                 on_progress(index - 1, total, row["display_name"])
+            archived: Path | None = None
             try:
                 metadata = await self.canvas.get_json(f"/api/v1/files/{row['id']}")
                 download_url = metadata.get("url")
@@ -103,7 +104,7 @@ class BackupService:
                         on_progress(index, total, row["display_name"])
                     continue
 
-                self._archive_previous(row, destination)
+                archived = self._archive_previous(row, destination)
                 with self.db.connect() as conn:
                     conn.execute(
                         """
@@ -156,17 +157,58 @@ class BackupService:
                 if on_progress:
                     on_progress(index, total, row["display_name"])
             except Exception as exc:  # Keep one bad file from failing the course.
+                # The re-download failed: bring back the last good copy that
+                # _archive_previous moved away so local_path stays valid.
+                self._restore_archived(row, archived)
+                cancel_exc: Exception | None = None
                 if check_cancelled:
-                    check_cancelled()
+                    try:
+                        check_cancelled()
+                    except Exception as raised:
+                        cancel_exc = raised
+                error_text = f"{exc.__class__.__name__}: {exc}"
+                has_local_copy = bool(
+                    row["backup_status"] == "downloaded"
+                    and row["local_path"]
+                    and Path(row["local_path"]).exists()
+                )
                 with self.db.connect() as conn:
-                    conn.execute(
-                        """
-                        UPDATE files
-                        SET backup_status = 'fail_download', backup_error = ?
-                        WHERE id = ?
-                        """,
-                        (f"{exc.__class__.__name__}: {exc}", row["id"]),
-                    )
+                    if cancel_exc is not None:
+                        # Cancelled mid-download: restore the pre-download status
+                        # instead of leaving the row stuck on 'downloading'.
+                        prior_status = row["backup_status"] or "pending"
+                        if prior_status == "downloading":
+                            prior_status = "pending"
+                        conn.execute(
+                            """
+                            UPDATE files
+                            SET backup_status = ?, backup_error = ?
+                            WHERE id = ?
+                            """,
+                            (prior_status, row["backup_error"], row["id"]),
+                        )
+                    elif has_local_copy:
+                        # The stale-but-valid copy keeps serving downloads and
+                        # previews; record why the refresh failed alongside it.
+                        conn.execute(
+                            """
+                            UPDATE files
+                            SET backup_status = 'downloaded', backup_error = ?
+                            WHERE id = ?
+                            """,
+                            (f"Refresh failed; keeping the previous local copy. {error_text}", row["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE files
+                            SET backup_status = 'fail_download', backup_error = ?
+                            WHERE id = ?
+                            """,
+                            (error_text, row["id"]),
+                        )
+                if cancel_exc is not None:
+                    raise cancel_exc
                 counts["failed"] += 1
                 self.db.add_event(
                     category="file",
@@ -235,15 +277,30 @@ class BackupService:
             return False
         return row["downloaded_canvas_updated_at"] == row["updated_at"]
 
-    def _archive_previous(self, row, destination: Path) -> None:
+    def _archive_previous(self, row, destination: Path) -> Path | None:
+        """Move the previous local copy into .versions; return its archive path."""
         local_path = row["local_path"]
         if not local_path:
-            return
+            return None
         previous = Path(local_path)
         if not previous.exists():
-            return
+            return None
         version_dir = destination.parent / ".versions"
         version_dir.mkdir(parents=True, exist_ok=True)
         stamp = (row["downloaded_at"] or utc_now()).replace(":", "").replace("+", "_")
         archive = version_dir / f"{row['id']}_{stamp}_{safe_filename(row['filename'])}"
         shutil.move(str(previous), str(archive))
+        return archive
+
+    def _restore_archived(self, row, archive: Path | None) -> None:
+        """Best-effort restore of the archived copy after a failed re-download."""
+        if archive is None or not archive.exists() or not row["local_path"]:
+            return
+        previous = Path(row["local_path"])
+        try:
+            if not previous.exists():
+                previous.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(archive), str(previous))
+        except OSError:
+            # Leave the copy under .versions rather than failing the error path.
+            pass

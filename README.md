@@ -6,7 +6,7 @@ Local-first Canvas course material manager. The backend syncs Canvas data throug
 
 - Read-only Canvas API access. Canvas credentials stay on the backend.
 - Local SQLite cache for courses, announcements, assignments, calendar events, pages, people, and file indexes.
-- Course file backup, ZIP download, preview, text extraction, and OCR-assisted parsing.
+- Course file backup with previous-copy restore on failed refresh, ZIP download, preview, text extraction, and OCR-assisted parsing.
 - Structured timeline from synced assignments, calendar events, and announcements.
 - Agent chat backed by an OpenAI-compatible model provider, with local Canvas cache tools.
 - Runtime settings for Canvas token, Agent provider, sync schedule, OCR, Telegram, and email notifications.

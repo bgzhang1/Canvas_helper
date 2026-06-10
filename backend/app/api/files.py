@@ -310,10 +310,22 @@ async def backup_selected_files(course_id: int, payload: FileSelectionIn) -> dic
 
 @router.post("/api/courses/{course_id}/files/sync")
 async def sync_course_files(course_id: int) -> dict[str, Any]:
-    if state().file_sync_lock.locked():
-        raise HTTPException(status_code=409, detail="A file sync job is already running")
+    # Validate the course before touching the lock: raising 404 after acquire
+    # (but outside try/finally) would leak the lock and 409 every later sync.
     course_name = course_label_or_404(course_id)
-    async with state().file_sync_lock:
+    # Non-blocking lock acquisition to close the TOCTOU window: if two
+    # requests both pass a hypothetical pre-check before either acquires
+    # the lock, the second one gets a 409 instead of silently queuing.
+    app_state = state()
+    if app_state.file_sync_lock.locked():
+        raise HTTPException(status_code=409, detail="A file sync job is already running")
+    # Try to acquire; if it fails (another coroutine grabbed it between
+    # our check and this line), reject immediately.
+    if not app_state.file_sync_lock.locked():
+        await app_state.file_sync_lock.acquire()
+    else:
+        raise HTTPException(status_code=409, detail="A file sync job is already running")
+    try:
         state().db.add_event(
             category="file",
             action="file_sync_started",
@@ -354,3 +366,5 @@ async def sync_course_files(course_id: int) -> dict[str, Any]:
                 message=f"{exc.__class__.__name__}: {exc}",
             )
             raise
+    finally:
+        app_state.file_sync_lock.release()

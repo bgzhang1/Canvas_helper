@@ -57,7 +57,10 @@ AGENT_SYSTEM_PROMPT = (
     "enumerate assignments and calendar events, and read each item's details to tell in-person from online.\n"
     "- Keyword lookups across announcements, assignments, pages, and extracted file text: call "
     "search_course_materials; pass the course code (e.g. CS3334) as course when the user names one.\n\n"
-    "If a file is found but not yet downloaded, call download_file before read_file. Use local/shell tools when "
+    "If a file is found but not yet downloaded, call download_file before read_file. "
+    "search_course_materials file results include file_id when available; pass it directly to read_file. read_file pages "
+    "long files: when its reply includes next_offset, call it again with that offset to keep reading instead "
+    "of stopping at the first page. Use local/shell tools when "
     "useful; filesystem writes are allowed only inside the project sandbox, outside paths are read-only. Use "
     "notification tools only for explicit notification or reminder requests.\n\n"
     "Batch your tool calls: list_schedule, search_course_materials, and search_files accept arrays for course "
@@ -155,7 +158,12 @@ def _course_matches(label: str, filters: list[str]) -> bool:
 def _course_search_tool() -> AgentTool:
     return AgentTool(
         name="search_course_materials",
-        description="Search synced course announcements, assignments, pages, and extracted file text. Pass several keywords as a 'query' array and/or several courses as a 'course' array to run many searches in one call instead of repeating it.",
+        description=(
+            "Search synced course announcements, assignments, pages, and extracted file text. "
+            "File matches include file_id when available; pass it straight to read_file to read around the match. "
+            "Pass several keywords as a 'query' array and/or several courses as a 'course' array to run many "
+            "searches in one call instead of repeating it."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -237,7 +245,7 @@ def _search_course_materials_legacy(query: str, course_filter: str, limit: int) 
                         return matches
         files = rows_to_dicts(
             conn.execute(
-                f"SELECT course_id, display_name, extracted_text_path FROM files WHERE course_id IN ({placeholders})",
+                f"SELECT id, course_id, display_name, extracted_text_path FROM files WHERE course_id IN ({placeholders})",
                 course_ids,
             ).fetchall()
         )
@@ -252,17 +260,28 @@ def _search_course_materials_legacy(query: str, course_filter: str, limit: int) 
                 text = ""
         blob = f"{name}\n{text}"
         if needle in blob.lower():
-            matches.append(_match(labels, row["course_id"], "file", name, blob, needle))
+            matches.append(_match(labels, row["course_id"], "file", name, blob, needle, {"file_id": row["id"]}))
             if len(matches) >= limit:
                 break
     return matches
 
 
-def _match(labels: dict[int, str], course_id: int, source: str, title: str, blob: str, needle: str) -> dict[str, Any]:
+def _match(
+    labels: dict[int, str],
+    course_id: int,
+    source: str,
+    title: str,
+    blob: str,
+    needle: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     idx = blob.lower().find(needle)
     start = max(0, idx - 200)
     snippet = blob[start : start + 600].strip()
-    return {"course": labels.get(course_id, course_id), "source": source, "title": title, "snippet": snippet}
+    result = {"course": labels.get(course_id, course_id), "source": source, "title": title, "snippet": snippet}
+    if extra:
+        result.update(extra)
+    return result
 
 
 def _file_search_tool() -> AgentTool:
@@ -288,11 +307,21 @@ def _file_search_tool() -> AgentTool:
 def _file_read_tool() -> AgentTool:
     return AgentTool(
         name="read_file",
-        description="Read the extracted text of a synced course file (pdf, docx, pptx, etc.) by file_id. Downloads-then-extracts on demand if needed.",
+        description=(
+            "Read the extracted text of a synced course file (pdf, docx, pptx, etc.) by file_id. "
+            "Long files are paged: when the reply includes next_offset, call again with offset=next_offset "
+            "to keep reading. Downloads-then-extracts on demand if needed."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "file_id": {"type": "integer"},
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Character offset to continue reading a long file (use next_offset from the previous reply).",
+                },
                 "limit": {"type": "integer", "minimum": 200, "maximum": 16000, "default": 8000},
             },
             "required": ["file_id"],
@@ -460,6 +489,7 @@ def _file_row(file_id: int) -> dict[str, Any]:
 def _read_file(args: dict[str, Any]) -> dict[str, Any]:
     file_id = int(args.get("file_id"))
     limit = max(200, min(int(args["limit"]) if str(args.get("limit") or "").isdigit() else 8000, 16000))
+    offset = max(0, int(args["offset"]) if str(args.get("offset") or "").isdigit() else 0)
     row = _file_row(file_id)
     text_path = row.get("extracted_text_path")
     if text_path and Path(text_path).exists():
@@ -468,9 +498,24 @@ def _read_file(args: dict[str, Any]) -> dict[str, Any]:
         text, _status, _warning = make_extractor().extract_file(Path(row["local_path"]), row.get("content_type"))
     else:
         return {"file_id": file_id, "display_name": row.get("display_name"), "text": "", "note": "Not downloaded yet; call download_file first."}
-    if len(text) > limit:
-        text = text[:limit] + "\n[truncated]"
-    return {"file_id": file_id, "display_name": row.get("display_name"), "text": text}
+    total = len(text)
+    result: dict[str, Any] = {
+        "file_id": file_id,
+        "display_name": row.get("display_name"),
+        "offset": offset,
+        "total_chars": total,
+        "text": text[offset : offset + limit],
+    }
+    next_offset = offset + limit
+    if next_offset < total:
+        result["next_offset"] = next_offset
+        result["note"] = (
+            f"Partial read: characters {offset}-{next_offset} of {total}. "
+            f"Call read_file again with offset={next_offset} to continue."
+        )
+    elif total and offset >= total:
+        result["note"] = f"Offset {offset} is beyond the end of the file ({total} characters)."
+    return result
 
 
 def _download_file(file_id: int) -> dict[str, Any]:

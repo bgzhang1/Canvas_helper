@@ -103,7 +103,10 @@ async def agent_chat(payload: AgentChatIn) -> dict[str, Any]:
             message=error_message,
             metadata={**event_metadata, **error_meta},
         )
-        raise
+        # Surface the provider/network diagnosis instead of a generic 500 so the
+        # client can show why the upstream model call failed (mirrors the
+        # streaming endpoint's error event).
+        raise HTTPException(status_code=502, detail=error_message) from exc
     content = run.content.strip() or "(empty response)"
     state().db.add_event(
         category="agent",

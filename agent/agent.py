@@ -643,9 +643,18 @@ class OpenAICompatAgent:
                 attempt += 1
                 continue
             response.raise_for_status()
-            data = response.json()
-            choices = data.get("choices") or []
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            choices = (data.get("choices") or []) if isinstance(data, dict) else []
             if not choices:
+                # Some gateways return 200 with an invalid/empty body under load;
+                # treat that like a transient fault and retry before giving up.
+                if attempt < self.config.max_retries:
+                    await self._sleep_backoff(attempt, response, reason="empty completion body")
+                    attempt += 1
+                    continue
                 raise httpx.HTTPError("Provider returned no choices in chat completion response")
             return choices[0].get("message") or {}, data.get("usage") or {}
 

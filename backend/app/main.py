@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     app.state.app_state = app_state
     app_state.db.init()
     app_state.db.mark_stale_sync_runs_interrupted()
+    app_state.db.mark_stale_downloads_interrupted()
     if app_state.db.get_setting("sync.enabled", "false") == "true":
         app_state.scheduler_task = asyncio.create_task(runtime.sync_scheduler())
     yield

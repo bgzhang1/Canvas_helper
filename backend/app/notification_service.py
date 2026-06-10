@@ -67,6 +67,17 @@ class NotificationService:
             response = client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
+        except Exception as exc:
+            # Record send failures so they stay visible even when an agent tool
+            # or caller catches the exception.
+            self._add_event(
+                action="telegram_failed",
+                status="failed",
+                title="Telegram notification failed",
+                message=f"{exc.__class__.__name__}: {exc}",
+                metadata={"chat_id": self._redacted_chat_id(), "message_length": len(message)},
+            )
+            raise
         finally:
             if close_client:
                 client.close()
@@ -110,7 +121,30 @@ class NotificationService:
         message.set_content(clean_body)
 
         if self.config.smtp_host:
-            self._send_smtp(message)
+            try:
+                self._send_smtp(message)
+            except Exception as exc:
+                # SMTP being configured but unreachable must not lose the
+                # reminder: fall back to the local outbox and log the failure.
+                outbox_path = self._write_outbox(message)
+                self._add_event(
+                    action="email_reminder_failed",
+                    status="warning",
+                    title="Email reminder SMTP send failed",
+                    message=f"SMTP send failed ({exc.__class__.__name__}: {exc}); reminder was written to the local outbox.",
+                    metadata={
+                        "target": self._redacted_email(),
+                        "subject": clean_subject,
+                        "due_at": due_at,
+                        "path": str(outbox_path),
+                    },
+                )
+                return {
+                    "status": "queued",
+                    "target": self._redacted_email(),
+                    "path": str(outbox_path),
+                    "error": f"SMTP send failed: {exc.__class__.__name__}: {exc}",
+                }
             self._add_event(
                 action="email_reminder_sent",
                 status="success",

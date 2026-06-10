@@ -121,7 +121,7 @@ class SyncService:
                 with self.db.connect() as conn:
                     existing = conn.execute("SELECT COUNT(*) AS cnt FROM courses").fetchone()["cnt"]
                 if existing > 0:
-                    now = datetime.now(timezone.utc).isoformat()
+                    now = datetime.now(timezone.utc)
                     courses = [
                         c for c in courses
                         if self._is_current_term(c, now)
@@ -619,7 +619,9 @@ class SyncService:
                     detail = await self.canvas.get_json(
                         f"/api/v1/courses/{course_id}/pages/{quote(page_url, safe='')}"
                     )
-                except httpx.HTTPStatusError:
+                except httpx.HTTPError:
+                    # Degrade to the list item (no body) on per-page status or
+                    # transport failures instead of failing the whole course.
                     detail = page
             details.append((page, detail, page_url or str(page.get("page_id") or page.get("id"))))
 
@@ -841,17 +843,28 @@ class SyncService:
                 redacted[key] = None
         return redacted
 
-    def _is_current_term(self, course: dict, now_iso: str) -> bool:
+    def _is_current_term(self, course: dict, now: datetime) -> bool:
         term = course.get("term") or {}
-        start = term.get("start_at")
-        end = term.get("end_at")
-        if not start and not end:
-            return True  # no term dates = always include
-        if start and now_iso < start:
+        start = self._parse_term_date(term.get("start_at"))
+        end = self._parse_term_date(term.get("end_at"))
+        if start is None and end is None:
+            return True  # no (parseable) term dates = always include
+        if start and now < start:
             return False
-        if end and now_iso > end:
+        if end and now > end:
             return False
         return True
+
+    @staticmethod
+    def _parse_term_date(value: Any) -> datetime | None:
+        """Parse a Canvas ISO timestamp; unparseable values degrade to None (inclusive)."""
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     async def _optional_paginate(self, path: str, params: dict) -> list:
         try:
