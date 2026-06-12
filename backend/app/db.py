@@ -59,7 +59,7 @@ class Database:
         return (
             (1, self._create_initial_schema),
             (2, self._create_performance_indexes),
-            (3, self._drop_ai_analysis_artifacts),
+            (3, self._mark_legacy_schema_current),
         )
 
     def _create_initial_schema(self, conn: sqlite3.Connection) -> None:
@@ -231,21 +231,8 @@ class Database:
             """
         )
 
-    def _drop_ai_analysis_artifacts(self, conn: sqlite3.Connection) -> None:
-        conn.executescript(
-            """
-            DROP TABLE IF EXISTS analyses;
-            INSERT OR IGNORE INTO settings(key, value, updated_at)
-            SELECT 'agent.' || substr(key, 4), value, updated_at
-            FROM settings
-            WHERE key LIKE 'ai.%';
-            DELETE FROM settings WHERE key LIKE 'ai.%';
-            UPDATE event_logs
-            SET category = 'agent'
-            WHERE category = 'ai' AND action LIKE 'agent_%';
-            DELETE FROM event_logs WHERE category = 'ai' OR action LIKE 'analysis_%';
-            """
-        )
+    def _mark_legacy_schema_current(self, conn: sqlite3.Connection) -> None:
+        return None
 
     def _ensure_defaults(self, conn: sqlite3.Connection) -> None:
         self.set_default(conn, "sync.enabled", "false")

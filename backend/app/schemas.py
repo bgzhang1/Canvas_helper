@@ -18,36 +18,6 @@ class CanvasSettingsTestIn(BaseModel):
     api_token: str | None = None
 
 
-class AgentSettingsIn(BaseModel):
-    base_url: str | None = None
-    api_key: str | None = None
-    model: str = "gpt-4.1-mini"
-    reasoning_effort: str = "medium"
-    skills: str = ""
-
-
-class AgentSettingsTestIn(BaseModel):
-    base_url: str | None = None
-    api_key: str | None = None
-
-
-class AgentModelIn(BaseModel):
-    model: str = ""
-
-
-class AgentChatMessageIn(BaseModel):
-    role: str
-    content: str = Field(default="", max_length=200_000)
-
-
-class AgentChatIn(BaseModel):
-    message: str = Field(max_length=50_000)
-    history: list[AgentChatMessageIn] = Field(default_factory=list, max_length=100)
-    course_id: int | None = None
-    session_id: str | None = None
-    session_title: str | None = None
-
-
 class NotificationSettingsIn(BaseModel):
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None

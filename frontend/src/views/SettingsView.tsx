@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bell, Cpu, Database, FileText, Network, RefreshCcw, ShieldCheck } from 'lucide-react';
-import type { AgentModelTestResult, AppSettings, CanvasTestResult, EventLog, EventLogFilter, SyncStatus } from '../types';
+import { Bell, Database, FileText, Network, RefreshCcw, ShieldCheck } from 'lucide-react';
+import type { AppSettings, CanvasTestResult, EventLog, EventLogFilter, SyncStatus } from '../types';
 import { useAppContext } from '../context/AppContext';
 import {
   fetchEventLogs,
-  saveAgentSettings as persistAgentSettings,
   saveCanvasSettings as persistCanvasSettings,
   saveNotificationSettings as persistNotificationSettings,
   saveSyncSettings as persistSyncSettings,
-  testAgentSettings as requestAgentSettingsTest,
   testCanvasSettings as requestCanvasSettingsTest
 } from '../api/settings';
 import { EmptyState } from '../components/ui';
@@ -27,21 +25,17 @@ export function SettingsView({
   onRefreshSettings: () => Promise<void>;
 }) {
   const { setError, t } = useAppContext();
-  const [saving, setSaving] = useState<'canvas' | 'agent' | 'sync' | 'notifications' | null>(null);
+  const [saving, setSaving] = useState<'canvas' | 'sync' | 'notifications' | null>(null);
   const [expanded, setExpanded] = useState({
     canvas: true,
-    agent: false,
     daemon: false,
     push: false,
     logs: false
   });
   const [canvasApiToken, setCanvasApiToken] = useState('');
-  const [agentApiKey, setAgentApiKey] = useState('');
   const [telegramBotToken, setTelegramBotToken] = useState('');
   const [isTestingCanvas, setIsTestingCanvas] = useState(false);
   const [canvasTest, setCanvasTest] = useState<CanvasTestResult | null>(null);
-  const [isTestingAgent, setIsTestingAgent] = useState(false);
-  const [agentTest, setAgentTest] = useState<AgentModelTestResult | null>(null);
   const [eventLogs, setEventLogs] = useState<EventLog[]>([]);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
   const [eventLogFilter, setEventLogFilter] = useState<EventLogFilter>('all');
@@ -67,11 +61,6 @@ export function SettingsView({
 
   function toggleSection(section: keyof typeof expanded) {
     setExpanded((current) => ({ ...current, [section]: !current[section] }));
-  }
-
-  function updateAgent(values: Partial<AppSettings['agent']>) {
-    if (!settings) return;
-    onSettingsChange({ ...settings, agent: { ...settings.agent, ...values } });
   }
 
   function updateNotifications(values: Partial<AppSettings['notifications']>) {
@@ -120,36 +109,6 @@ export function SettingsView({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsTestingCanvas(false);
-    }
-  }
-
-  async function saveAgentSettings() {
-    if (!settings) return;
-    setSaving('agent');
-    setError(null);
-    try {
-      const agent = await persistAgentSettings(settings.agent, agentApiKey);
-      setAgentApiKey('');
-      onSettingsChange({ ...settings, agent });
-      await onRefreshSettings();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(null);
-    }
-  }
-
-  async function testAgentSettings() {
-    if (!settings) return;
-    setIsTestingAgent(true);
-    setAgentTest(null);
-    setError(null);
-    try {
-      setAgentTest(await requestAgentSettingsTest(settings.agent.base_url, agentApiKey));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsTestingAgent(false);
     }
   }
 
@@ -235,73 +194,6 @@ export function SettingsView({
                   </div>
                 )}
                 <ConfigRow label={t('ocr')} value={`${settings.ocr.enabled ? t('enabled') : t('disabled')} // ${settings.ocr.languages} // ${settings.ocr.max_pages} ${t('pages')}`} />
-              </div>
-            )}
-          </section>
-
-          <section>
-            <AccordionHeader expanded={expanded.agent} icon={<Cpu size={14} />} label={t('agentProvider')} onClick={() => toggleSection('agent')} />
-            {expanded.agent && (
-              <div className="settings-panel border border-black bg-[#F4F4F0] p-6 space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <TextField label={t('compatBaseUrl')} value={settings.agent.base_url} onChange={(value) => updateAgent({ base_url: value })} placeholder="https://api.openai.com/v1" />
-                  <TextField
-                    label={t('apiKey')}
-                    value={agentApiKey}
-                    onChange={setAgentApiKey}
-                    placeholder={settings.agent.api_key_configured ? t('existingKeyPlaceholder') : 'sk-...'}
-                    type="password"
-                  />
-                </div>
-
-                <TextField
-                  label={t('modelSelect')}
-                  value={settings.agent.model}
-                  onChange={(value) => updateAgent({ model: value })}
-                  placeholder={t('modelPlaceholder')}
-                />
-
-                <div className="flex flex-col gap-2">
-                  <label className="text-[10px] font-mono tracking-widest uppercase">{t('reasoningEffort')}</label>
-                  <select
-                    value={settings.agent.reasoning_effort}
-                    onChange={(event) => updateAgent({ reasoning_effort: event.target.value })}
-                    className="border border-black bg-white focus:bg-[#E8E8E3] text-sm font-mono rounded-none focus:ring-0 outline-none p-2 uppercase"
-                  >
-                    <option value="low">{t('low')}</option>
-                    <option value="medium">{t('medium')}</option>
-                    <option value="high">{t('high')}</option>
-                  </select>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <label className="text-[10px] font-mono tracking-widest uppercase">{t('skillManagement')}</label>
-                  <textarea
-                    rows={3}
-                    value={settings.agent.skills}
-                    onChange={(event) => updateAgent({ skills: event.target.value })}
-                    placeholder={t('skillPlaceholder')}
-                    className="border border-black px-4 py-3 text-sm font-mono bg-white focus:bg-[#E8E8E3] outline-none transition-colors resize-y min-h-[80px]"
-                  />
-                </div>
-
-                <div className="settings-actions flex flex-col sm:flex-row gap-3">
-                  <SaveConfigButton saving={saving === 'agent'} label={t('saveConfig')} onClick={saveAgentSettings} />
-                  <button
-                    onClick={testAgentSettings}
-                    disabled={isTestingAgent}
-                    className="flex min-w-0 max-w-full items-center justify-center gap-2 px-4 py-2 text-xs font-mono font-bold tracking-widest uppercase border border-black bg-[#F4F4F0] text-black hover:bg-black hover:text-[#F4F4F0] disabled:bg-[#E8E8E3] disabled:text-gray-500 disabled:cursor-wait"
-                  >
-                    <Cpu size={14} className={isTestingAgent ? 'animate-pulse' : ''} />
-                    {isTestingAgent ? t('testing') : t('testModel')}
-                  </button>
-                </div>
-                {agentTest && (
-                  <div className={`border border-black px-4 py-3 text-xs font-mono ${agentTest.ok ? 'bg-black text-[#F4F4F0]' : 'bg-white text-black'}`}>
-                    <div className="font-bold tracking-widest uppercase">{agentTest.ok ? t('testPassed') : t('testFailed')}</div>
-                    <div className="mt-1 break-words">{agentTest.message}</div>
-                  </div>
-                )}
               </div>
             )}
           </section>

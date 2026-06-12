@@ -8,7 +8,6 @@ from fastapi import APIRouter
 
 from ..canvas_client import CanvasReadOnlyClient, CanvasSecurityError
 from ..runtime import (
-    get_agent_settings,
     get_canvas_api_token,
     get_canvas_settings,
     get_notification_settings,
@@ -17,9 +16,6 @@ from ..runtime import (
     state,
 )
 from ..schemas import (
-    AgentModelIn,
-    AgentSettingsIn,
-    AgentSettingsTestIn,
     CanvasSettingsIn,
     CanvasSettingsTestIn,
     NotificationSettingsIn,
@@ -41,7 +37,6 @@ async def app_settings() -> dict[str, Any]:
             "languages": state().settings.ocr_languages,
             "max_pages": state().settings.ocr_max_pages,
         },
-        "agent": get_agent_settings(),
         "notifications": get_notification_settings(),
     }
 
@@ -110,75 +105,6 @@ async def put_sync_settings(payload: SyncSettingsIn) -> dict[str, Any]:
     )
     restart_scheduler()
     return get_sync_settings()
-
-
-@router.put("/api/settings/agent")
-async def put_agent_settings(payload: AgentSettingsIn) -> dict[str, Any]:
-    values = {
-        "agent.base_url": payload.base_url or "",
-        "agent.model": payload.model.strip() or state().settings.openai_compat_model,
-        "agent.reasoning_effort": payload.reasoning_effort if payload.reasoning_effort in {"low", "medium", "high"} else "medium",
-        "agent.skills": payload.skills,
-    }
-    if payload.api_key:
-        values["agent.api_key"] = payload.api_key
-    state().db.put_settings(values)
-    return get_agent_settings()
-
-
-def _agent_models_url(base_url: str) -> str:
-    base = (base_url or "").strip().rstrip("/")
-    low = base.lower()
-    if low.endswith("/chat/completions"):
-        return base[: -len("/chat/completions")] + "/models"
-    if low.endswith("/v1") or low.endswith("/openai/v1") or low.endswith("/v1/openai"):
-        return f"{base}/models"
-    return f"{base}/v1/models"
-
-
-async def _fetch_agent_models(base_url: str | None, api_key: str | None) -> dict[str, Any]:
-    saved = get_agent_settings(include_secrets=True)
-    base = (base_url or saved["base_url"] or "").strip()
-    key = (api_key or saved.get("api_key") or "").strip()
-    if not base or not key:
-        return {
-            "ok": False,
-            "models": [],
-            "message": "Agent model provider is not configured. Set base URL and API key first.",
-        }
-    if key.lower().startswith("bearer "):
-        key = key[7:].strip()
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(_agent_models_url(base), headers={"Authorization": f"Bearer {key}"})
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPStatusError as exc:
-        return {"ok": False, "models": [], "message": f"Provider returned HTTP {exc.response.status_code}."}
-    except httpx.RequestError as exc:
-        return {"ok": False, "models": [], "message": f"Connection failed: {exc.__class__.__name__}: {exc}"}
-    items = data.get("data") if isinstance(data, dict) else data
-    models = sorted({str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")}) if isinstance(items, list) else []
-    return {"ok": True, "models": models, "message": f"{len(models)} models available."}
-
-
-@router.post("/api/settings/agent/test")
-async def test_agent_settings(payload: AgentSettingsTestIn) -> dict[str, Any]:
-    result = await _fetch_agent_models(payload.base_url, payload.api_key)
-    return {"ok": result["ok"], "message": result["message"], "model_count": len(result["models"])}
-
-
-@router.get("/api/settings/agent/models")
-async def list_agent_models() -> dict[str, Any]:
-    return {**await _fetch_agent_models(None, None), "model": get_agent_settings()["model"]}
-
-
-@router.put("/api/settings/agent/model")
-async def put_agent_model(payload: AgentModelIn) -> dict[str, Any]:
-    model = (payload.model or "").strip()
-    if model:
-        state().db.put_settings({"agent.model": model})
-    return get_agent_settings()
 
 
 @router.put("/api/settings/notifications")

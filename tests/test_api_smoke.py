@@ -18,8 +18,6 @@ def client(tmp_path, monkeypatch):
         data_dir=tmp_path,
         sqlite_path=tmp_path / "canvas_material_test.db",
         canvas_api_token=None,
-        openai_compat_base_url=None,
-        openai_compat_api_key=None,
     )
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
 
@@ -175,7 +173,6 @@ def test_read_endpoints_return_seeded_course_material(client: TestClient) -> Non
 
     timeline = client.get("/api/courses/1/timeline").json()
     assert timeline["data_sources"]["assignments"]["count"] == 1
-    assert "analysis" not in timeline
     detail = client.get("/api/courses/1/detail").json()
     assert detail["announcements"][0]["title"] == "Exam reminder"
     assert detail["assignments"][0]["name"] == "Lab 1"
@@ -183,9 +180,7 @@ def test_read_endpoints_return_seeded_course_material(client: TestClient) -> Non
     assert detail["assignments"][0]["points_possible"] == 10
     assert next(item for item in detail["files"] if item["id"] == 601)["outline"] == [{"title": "Intro"}]
     assert detail["people"][0]["name"] == "Ada Lovelace"
-    assert "analysis" not in detail["timeline"]
     assert detail["home"]["title"] == "Home"
-    assert client.get("/api/courses/1/analysis").status_code == 404
     assert client.get("/api/events?limit=5").json()[0]["metadata"] == {}
 
 
@@ -216,36 +211,17 @@ def test_file_endpoint_guards_for_empty_missing_and_uncached_selection(client: T
     assert client.get("/api/courses/1/files/602/download").status_code == 409
     assert client.post("/api/courses/1/files/602/extract").status_code == 409
     assert client.post("/api/courses/999/files/sync").status_code == 404
-    assert client.post("/api/courses/999/analyze").status_code in {404, 405}
-
 
 def test_settings_and_status_endpoints(client: TestClient) -> None:
     settings = client.get("/api/settings").json()
     assert settings["sync"]["enabled"] is False
     assert settings["token_configured"] is False
-    assert "agent" in settings
-    assert "ai" not in settings
 
     assert client.post("/api/settings/canvas/test", json={"api_token": ""}).json()["ok"] is False
     assert client.put("/api/settings/canvas", json={"api_token": "test-token"}).json()["token_configured"] is True
     assert client.get("/api/settings/sync").json()["interval_minutes"] == 60
     assert client.put("/api/settings/sync", json={"enabled": False, "interval_minutes": 1}).status_code == 422
     assert client.put("/api/settings/sync", json={"enabled": False, "interval_minutes": 15}).json()["interval_minutes"] == 15
-    assert client.put("/api/settings/ai", json={}).status_code in {404, 405}
-    assert client.get("/api/settings/agent/models").json()["ok"] is False
-    agent_response = client.put(
-        "/api/settings/agent",
-        json={
-            "base_url": "https://llm.example/v1",
-            "model": "gpt-test",
-            "reasoning_effort": "high",
-            "skills": "Prefer local Canvas cache.",
-        },
-    ).json()
-    assert agent_response["base_url"] == "https://llm.example/v1"
-    assert agent_response["model"] == "gpt-test"
-    assert agent_response["reasoning_effort"] == "high"
-    assert agent_response["configured"] is False
     assert client.put(
         "/api/settings/notifications",
         json={
@@ -259,13 +235,6 @@ def test_settings_and_status_endpoints(client: TestClient) -> None:
 
     assert client.get("/api/sync/status").json()["running"] is False
     assert client.post("/api/sync/cancel").json()["status"] == "idle"
-    assert client.get("/api/analysis/status").status_code == 404
-    chat = client.post("/api/agent/chat", json={"message": "status"})
-    assert chat.status_code == 200
-    assert chat.json()["status"] == "not_configured"
-    stream = client.post("/api/agent/chat/stream", json={"message": "status"})
-    assert stream.status_code == 200
-    assert "not_configured" in stream.text
 
 
 def test_background_sync_routes_complete_without_external_services(client: TestClient) -> None:
@@ -274,4 +243,3 @@ def test_background_sync_routes_complete_without_external_services(client: TestC
 
     assert client.post("/api/courses/1/sync").json()["status"] == "started"
     assert client.get("/api/sync/status").json()["run"]["status"] == "failed"
-    assert client.post("/api/courses/1/analyze").status_code in {404, 405}

@@ -72,7 +72,6 @@ export function eventCategoryLabel(category: string, t: TFunction) {
   const normalized = category.toLowerCase();
   if (normalized === 'sync') return t('logCategorySync');
   if (normalized === 'file') return t('logCategoryFile');
-  if (normalized === 'agent') return t('logCategoryAgent');
   if (normalized === 'announcement') return t('logCategoryAnnouncement');
   if (normalized === 'assignment') return t('logCategoryAssignment');
   return category;
@@ -95,12 +94,7 @@ export function eventActionLabel(action: string, t: TFunction) {
     file_sync_failed: 'actionFileSyncFailed',
     file_backup_started: 'actionFileBackupStarted',
     file_backup_completed: 'actionFileBackupCompleted',
-    file_backup_failed: 'actionFileBackupFailed',
-    agent_chat_started: 'actionAgentChatStarted',
-    agent_chat_completed: 'actionAgentChatCompleted',
-    agent_chat_failed: 'actionAgentChatFailed',
-    agent_chat_not_configured: 'actionAgentChatNotConfigured',
-    agent_tool_call: 'actionAgentToolCall'
+    file_backup_failed: 'actionFileBackupFailed'
   };
   return labels[action] ? t(labels[action]) : action;
 }

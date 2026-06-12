@@ -137,14 +137,6 @@ export type AppSettings = {
     languages: string;
     max_pages: number;
   };
-  agent: {
-    base_url: string;
-    configured: boolean;
-    api_key_configured: boolean;
-    model: string;
-    reasoning_effort: string;
-    skills: string;
-  };
   notifications: {
     telegram_enabled: boolean;
     telegram_configured: boolean;
@@ -159,19 +151,6 @@ export type CanvasTestResult = {
   canvas_base_url: string;
   username: string | null;
   message: string;
-};
-
-export type AgentModelTestResult = {
-  ok: boolean;
-  message: string;
-  model_count: number;
-};
-
-export type AgentModelList = {
-  ok: boolean;
-  models: string[];
-  message: string;
-  model: string;
 };
 
 export type EventLog = {
@@ -189,16 +168,7 @@ export type EventLog = {
   metadata: Record<string, unknown>;
 };
 
-export type AgentChatMessage = {
-  role: 'user' | 'assistant';
-  content: string;
-  tools_used?: string[];
-  status?: string;
-  thinking?: string;
-  steps?: { name: string; status: 'running' | 'ok' | 'error'; args?: Record<string, unknown> | null }[];
-};
-
 export type ActiveTab = 'timeline' | 'files' | 'announcements' | 'assignments' | 'people';
-export type View = 'dashboard' | 'agent' | 'course' | 'settings';
+export type View = 'dashboard' | 'course' | 'settings';
 export type EventLogFilter = 'all' | 'success' | 'failed' | 'warning';
 export type EventLogLevel = Exclude<EventLogFilter, 'all'> | 'running' | 'other';

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, MessageSquare, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
+import { BookOpen, ChevronDown, ChevronRight, Globe, Menu, RefreshCcw, Search, Settings2, SquareTerminal, X } from 'lucide-react';
 import { Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
 import type { ActiveTab, AppSettings, Course, CourseDetail, SyncStatus, View } from './types';
 import type { Lang, TFunction } from './i18n';
@@ -14,7 +14,6 @@ import { SyncProgressBar } from './components/SyncProgressBar';
 import { DashboardView } from './views/DashboardView';
 import { CourseDetailView } from './views/CourseDetailView';
 import { SettingsView } from './views/SettingsView';
-import { AgentChatView } from './views/AgentChatView';
 import { courseCode, statusForCourse } from './utils/course';
 import { parseSyncProgress } from './utils/progress';
 import { useTermGroups } from './hooks/useTermGroups';
@@ -34,7 +33,6 @@ export function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCancellingSync, setIsCancellingSync] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
-  const [agentCourseId, setAgentCourseId] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -61,11 +59,9 @@ export function App() {
 
   const currentView: View = courseMatch
     ? 'course'
-    : location.pathname.startsWith('/agent')
-      ? 'agent'
-      : location.pathname.startsWith('/settings')
-        ? 'settings'
-        : 'dashboard';
+    : location.pathname.startsWith('/settings')
+      ? 'settings'
+      : 'dashboard';
 
   const filteredCourses = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -282,13 +278,11 @@ export function App() {
   const mobileViewLabel =
     currentView === 'dashboard'
       ? t('dashboard')
-      : currentView === 'agent'
-        ? t('agent')
-        : currentView === 'settings'
-          ? t('configuration')
-          : selectedCourse
-            ? courseCode(selectedCourse)
-            : t('dashboard');
+      : currentView === 'settings'
+        ? t('configuration')
+        : selectedCourse
+          ? courseCode(selectedCourse)
+          : t('dashboard');
 
   function navigateMobile(path: string) {
     setMobileSystemOpen(false);
@@ -353,16 +347,6 @@ export function App() {
                 >
                   <SquareTerminal size={16} />
                   {t('dashboard')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateMobile('/agent')}
-                  className={`w-full flex items-center gap-3 border-b border-black px-4 py-3 text-left text-sm font-mono ${
-                    currentView === 'agent' ? 'bg-black text-[#F4F4F0]' : 'bg-[#F4F4F0] text-black'
-                  }`}
-                >
-                  <MessageSquare size={16} />
-                  {t('agent')}
                 </button>
                 <button
                   type="button"
@@ -439,9 +423,6 @@ export function App() {
               <SidebarButton active={currentView === 'dashboard'} icon={<SquareTerminal size={18} strokeWidth={1.5} />} onClick={() => navigate('/')}>
                 {t('dashboard')}
               </SidebarButton>
-              <SidebarButton active={currentView === 'agent'} icon={<MessageSquare size={18} strokeWidth={1.5} />} onClick={() => navigate('/agent')}>
-                {t('agent')}
-              </SidebarButton>
               <SidebarButton active={currentView === 'settings'} icon={<Settings2 size={18} strokeWidth={1.5} />} onClick={() => navigate('/settings')}>
                 {t('configuration')}
               </SidebarButton>
@@ -509,7 +490,6 @@ export function App() {
           <header className="app-header min-h-16 border-b border-black bg-[#F4F4F0] flex items-center justify-between px-8 shrink-0">
             <div className="flex items-center gap-3 text-xs font-mono tracking-widest text-black min-w-0">
               {currentView === 'dashboard' && <span>~/{t('dashboard')}</span>}
-              {currentView === 'agent' && <span>~/{t('agent')}</span>}
               {currentView === 'settings' && <span>~/{t('configuration')}</span>}
               {currentView === 'course' && selectedCourse && (
                 <>
@@ -576,10 +556,6 @@ export function App() {
               <Route
                 path="/"
                 element={<DashboardView courses={filteredCourses} syncStatus={syncStatus} seenAnnouncements={seenAnnouncements} onSelectCourse={(course) => navigate(`/course/${course.id}`)} />}
-              />
-              <Route
-                path="/agent"
-                element={<AgentChatView courses={courses} selectedCourseId={agentCourseId} setSelectedCourseId={setAgentCourseId} />}
               />
               <Route
                 path="/settings"

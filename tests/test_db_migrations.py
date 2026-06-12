@@ -81,59 +81,6 @@ def test_init_is_idempotent_and_preserves_existing_data(tmp_path) -> None:
     assert db.get_setting("sync.enabled") == "true"
 
 
-def test_init_drops_legacy_ai_artifacts(tmp_path) -> None:
-    db_path = tmp_path / "legacy-ai.db"
-    legacy_db = Database(db_path)
-    now = utc_now()
-    with legacy_db.connect() as conn:
-        legacy_db._create_initial_schema(conn)
-        conn.executescript(
-            """
-            CREATE TABLE analyses (
-                course_id INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                model TEXT,
-                generated_at TEXT NOT NULL,
-                PRIMARY KEY(course_id, kind)
-            );
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO settings(key, value, updated_at)
-            VALUES ('ai.base_url', 'https://llm.example/v1', ?)
-            """,
-            (now,),
-        )
-        conn.execute(
-            """
-            INSERT INTO event_logs(created_at, category, action, status, title, metadata_json)
-            VALUES (?, 'ai', 'analysis_completed', 'success', 'Legacy analysis', '{}')
-            """,
-            (now,),
-        )
-        conn.execute(
-            """
-            INSERT INTO event_logs(created_at, category, action, status, title, metadata_json)
-            VALUES (?, 'ai', 'agent_chat_completed', 'success', 'Legacy agent chat', '{}')
-            """,
-            (now,),
-        )
-        conn.execute("PRAGMA user_version = 2")
-
-    db = Database(db_path)
-    db.init()
-
-    assert "analyses" not in table_names(db_path)
-    assert db.get_setting("agent.base_url") == "https://llm.example/v1"
-    assert db.get_setting("ai.base_url") is None
-    events = db.list_events()
-    assert len(events) == 1
-    assert events[0]["category"] == "agent"
-    assert events[0]["action"] == "agent_chat_completed"
-
-
 def test_init_marks_existing_version_zero_schema_as_current(tmp_path) -> None:
     db_path = tmp_path / "legacy.db"
     legacy_db = Database(db_path)

@@ -8,11 +8,8 @@ Local-first Canvas course material manager. The backend syncs Canvas data throug
 - Local SQLite cache for courses, announcements, assignments, calendar events, pages, people, and file indexes.
 - Course file backup with previous-copy restore on failed refresh, ZIP download, preview, text extraction, and OCR-assisted parsing.
 - Structured timeline from synced assignments, calendar events, and announcements.
-- Agent chat backed by an OpenAI-compatible model provider, with local Canvas cache tools.
-- Runtime settings for Canvas token, Agent provider, sync schedule, OCR, Telegram, and email notifications.
-- Event logs for sync, file, announcement, assignment, Agent, and notification activity.
-
-The course AI analysis workflow has been removed. Generated course analysis routes and analysis result storage are intentionally unavailable; the Agent chat module remains available.
+- Runtime settings for Canvas token, sync schedule, OCR, Telegram, and email notifications.
+- Event logs for sync, file, announcement, assignment, and notification activity.
 
 ## Requirements
 
@@ -36,9 +33,6 @@ Edit `.env` and set:
 ```dotenv
 CANVAS_BASE_URL=https://your-school.instructure.com/
 CANVAS_API_TOKEN=your_canvas_token
-OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1
-OPENAI_COMPAT_API_KEY=your_model_provider_key
-OPENAI_COMPAT_MODEL=gpt-4.1-mini
 ```
 
 ## Run

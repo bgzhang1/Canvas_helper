@@ -172,24 +172,6 @@ def get_canvas_settings() -> dict[str, Any]:
     }
 
 
-def get_agent_settings(*, include_secrets: bool = False) -> dict[str, Any]:
-    db = state().db
-    settings = state().settings
-    api_key = db.get_setting("agent.api_key", settings.openai_compat_api_key or "") or ""
-    base_url = db.get_setting("agent.base_url", settings.openai_compat_base_url or "") or ""
-    payload: dict[str, Any] = {
-        "base_url": base_url,
-        "configured": bool(base_url and api_key),
-        "api_key_configured": bool(api_key),
-        "model": db.get_setting("agent.model", settings.openai_compat_model) or settings.openai_compat_model,
-        "reasoning_effort": db.get_setting("agent.reasoning_effort", "medium") or "medium",
-        "skills": db.get_setting("agent.skills", "") or "",
-    }
-    if include_secrets:
-        payload["api_key"] = api_key
-    return payload
-
-
 def get_notification_settings(*, include_secrets: bool = False) -> dict[str, Any]:
     db = state().db
     telegram_token = db.get_setting("notify.telegram_bot_token", "") or ""

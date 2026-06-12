@@ -1,6 +1,6 @@
 # Canvas Material Manager Technical Documentation
 
-This document describes the current implementation after the model-based course analysis workflow was removed. The Agent chat module remains available.
+This document describes the current Canvas course material manager implementation.
 
 ## Overview
 
@@ -12,11 +12,8 @@ The application currently supports:
 - Course, announcement, assignment, people, home page, file, and timeline views.
 - Course file indexing, backup, extraction, preview, and ZIP download.
 - OCR-assisted extraction for supported document types.
-- Agent chat over an OpenAI-compatible model provider, with tools for locally synced Canvas data.
-- Runtime settings for Canvas token, Agent provider, sync schedule, OCR, and notifications.
-- Sync/file/Agent/event logs.
-
-There is no generated course analysis route, analysis status endpoint, analysis result table, or frontend control for that workflow. Database migration version 3 removes legacy analysis tables and logs while migrating legacy Agent provider settings from `ai.*` to `agent.*`.
+- Runtime settings for Canvas token, sync schedule, OCR, and notifications.
+- Sync/file/event logs.
 
 ## Stack
 
@@ -44,7 +41,6 @@ backend/app/
   notification_service.py Notification delivery helpers
   runtime.py              Shared app state and service factories
   api/
-    agent.py              Agent chat endpoints
     courses.py            Course metadata and timeline endpoints
     files.py              File backup, extraction, preview, download endpoints
     settings.py           Settings endpoints
@@ -63,9 +59,6 @@ frontend/src/
   utils/                  Formatting, labels, progress, course grouping
   views/                  Dashboard, course detail, settings, tabs
 
-agent/
-  agent.py                OpenAI-compatible Agent runtime and tool dispatch
-  chat.py                 Canvas-aware Agent prompts, context, and tools
 ```
 
 Runtime/generated paths such as `data/`, `.venv/`, `frontend/dist/`, and `__pycache__/` are not source modules.
@@ -97,7 +90,7 @@ Startup flow:
 5. Mark stale running sync tasks as interrupted.
 6. Start the scheduler when sync scheduling is enabled.
 
-`AppState` keeps the settings, database handle, sync locks, file sync lock, cancel event, and scheduler task. It no longer stores course analysis progress or locks.
+`AppState` keeps the settings, database handle, sync locks, file sync lock, cancel event, and scheduler task.
 
 ## Database
 
@@ -117,7 +110,7 @@ Main tables:
 | `event_logs` | Runtime event log |
 | `schema_migrations` | Applied schema migrations |
 
-Migration version 3 cleans up legacy course analysis storage by dropping the old result table, deleting old analysis event log actions, and migrating old `ai.*` Agent provider settings to `agent.*`.
+Migration version 3 is retained for existing database compatibility.
 
 ## Backend APIs
 
@@ -147,25 +140,16 @@ All endpoints are under `/api`.
 | GET | `/api/settings` | Canvas, sync, OCR, notification settings |
 | PUT | `/api/settings/canvas` | Save Canvas token |
 | POST | `/api/settings/canvas/test` | Test Canvas token |
-| PUT | `/api/settings/agent` | Save Agent provider settings |
-| POST | `/api/settings/agent/test` | Test Agent provider credentials |
-| GET | `/api/settings/agent/models` | List Agent provider models |
-| PUT | `/api/settings/agent/model` | Save selected Agent model |
 | GET | `/api/settings/sync` | Read sync schedule |
 | PUT | `/api/settings/sync` | Save sync schedule |
 | PUT | `/api/settings/notifications` | Save notification settings |
-| POST | `/api/agent/chat` | Send one Agent chat message |
-| POST | `/api/agent/chat/stream` | Stream one Agent chat response |
 | GET | `/api/events` | Event logs |
-
-Removed course analysis workflow endpoints are intentionally unavailable and covered by smoke tests.
 
 ## Frontend
 
 The frontend routes are:
 
 - `/` dashboard
-- `/agent` Agent chat
 - `/course/:courseId` course detail
 - `/settings` settings
 
@@ -179,7 +163,7 @@ Course detail tabs:
 - Assignments: assignments and submission details.
 - People: synced course members.
 
-Settings contains Canvas credentials, Agent provider settings, OCR status, sync scheduler settings, notification settings, event logs, and read-only boundary information.
+Settings contains Canvas credentials, OCR status, sync scheduler settings, notification settings, event logs, and read-only boundary information.
 
 ## Security Boundaries
 
